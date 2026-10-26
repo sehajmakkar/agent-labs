@@ -66,6 +66,10 @@ class LLMResponse:
     model: str
 
 
+class TransientLLMError(Exception):
+    """A model call failed for a reason that may pass on retry: overload, rate limit, timeout."""
+
+
 class LLMClient(Protocol):
     def generate(
         self, *, model: str, system: str, messages: list[Message], tools: list[Tool]

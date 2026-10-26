@@ -1,5 +1,9 @@
-from agentlab.llm.base import LLMResponse, Message, ToolCall, Usage
+import pytest
+
+from agentlab import semconv
+from agentlab.llm.base import LLMResponse, Message, ToolCall, TransientLLMError, Usage
 from agentlab.loop import Agent, run_agent
+from agentlab.retry import RetryPolicy
 from agentlab.tools import tool
 
 
@@ -86,3 +90,79 @@ def test_stops_after_max_steps():
     assert result.status == "max_steps"
     assert result.answer is None
     assert len(result.steps) == 3
+
+
+class FlakyLLM(ScriptedLLM):
+    """Fails with a transient error a set number of times before each scripted response."""
+
+    def __init__(self, failures: int, *messages: Message):
+        super().__init__(*messages)
+        self.failures = failures
+
+    def generate(self, **kwargs):
+        if self.failures:
+            self.failures -= 1
+            raise TransientLLMError("503 overloaded")
+        return super().generate(**kwargs)
+
+
+NO_WAIT = RetryPolicy(max_attempts=3, sleep=lambda seconds: None)
+
+
+def test_run_is_traced_as_agent_step_tool_tree(store):
+    llm = ScriptedLLM(
+        calls(ToolCall("get_order", {"order_id": "4417"}), ToolCall("cancel", {})),
+        answer("Delivered."),
+    )
+    result = run(llm)
+
+    run_row = store.find_run(result.run_id)
+    assert (run_row.status, run_row.output) == ("completed", {"answer": "Delivered."})
+    spans = store.spans(result.run_id)
+    by_id = {s.id: s for s in spans}
+    tree = [(s.name, by_id[s.parent_span_id].name if s.parent_span_id else None) for s in spans]
+    assert tree == [
+        ("invoke_agent test", None),
+        ("step 1", "invoke_agent test"),
+        ("execute_tool get_order", "step 1"),
+        ("execute_tool cancel", "step 1"),
+        ("step 2", "invoke_agent test"),
+    ]
+    unknown = spans[3]
+    assert unknown.error == "Unknown tool: cancel"
+
+
+def test_transient_errors_are_retried_and_counted(store):
+    result = run_agent(
+        AGENT, llm=FlakyLLM(2, answer("ok")), model="fake", user_message="hi", retry=NO_WAIT
+    )
+    assert result.answer == "ok"
+    assert result.steps[0].attempts == 3
+    step = store.spans(result.run_id)[1]
+    assert step.attributes[semconv.LLM_ATTEMPTS] == 3
+
+
+def test_run_fails_when_retries_run_out(store):
+    with pytest.raises(TransientLLMError):
+        run_agent(
+            AGENT, llm=FlakyLLM(5, answer("ok")), model="fake", user_message="hi", retry=NO_WAIT
+        )
+    (run_row,) = store.runs()
+    assert run_row.status == "error"
+    assert run_row.error == "TransientLLMError: 503 overloaded"
+
+
+def test_run_stops_when_time_is_up(store):
+    ticks = iter([0, 10, 100])  # start, before step 1, before step 2
+    llm = ScriptedLLM(calls(ToolCall("get_order", {"order_id": "4417"})), answer("never reached"))
+    result = run_agent(
+        AGENT,
+        llm=llm,
+        model="fake",
+        user_message="hi",
+        timeout_s=50,
+        clock=lambda: next(ticks),
+    )
+    assert result.status == "timeout"
+    assert len(result.steps) == 1
+    assert store.find_run(result.run_id).status == "timeout"

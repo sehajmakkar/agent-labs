@@ -17,8 +17,8 @@ Sizes are relative (S / M / L), not calendar estimates.
 | Phase | Name | Status |
 |---|---|---|
 | 0 | Setup and a first agent | ✅ Done |
-| 1 | Tracing SDK and trace store | ⏭️ Next |
-| 2 | Evals and the decision tree UI | ⬜ Not started |
+| 1 | Tracing SDK and trace store | ✅ Done |
+| 2 | Evals and the decision tree UI | ⏭️ Next |
 | 3 | Deterministic replay | ⬜ Not started |
 | 4 | Fork & Replay | ⬜ Not started |
 | 5 | Trajectory Diff | ⬜ Not started |
@@ -111,24 +111,25 @@ give every later feature *ground truth*: we know which step is really at fault.
 model call), tool and function calling.
 - **Pitch:** none yet.
 
-### Phase 1 — Tracing SDK and trace store · M · ⏭️ Next
+### Phase 1 — Tracing SDK and trace store · M · ✅ Done
 
-- [ ] Run and Span models, with field names aligned to the OTel GenAI conventions (pinned version)
-- [ ] Context propagation: each span knows its parent
-- [ ] Interceptor in *record* mode at the LLM client and tool boundaries
-- [ ] Recordings store Gemini's raw response content (C-005)
-- [ ] SQLite trace store (SQLModel)
-- [ ] Token accounting and cost per span
-- [ ] Retries and timeouts in the runner
-- [ ] SDK surface: `lab.wrap(client)`, `@lab.tool(kind="read" | "write")`, `@lab.agent(name)`
-- [ ] CLI prints a run as an indented tree with tokens, cost and latency
-- [ ] **Demo:** `lab run support "..."` → tree printed in the terminal
-- [ ] **Learnings** written up
+- [x] Run and Span models, with attribute names from the OTel GenAI conventions v1.41.0 (`semconv.py`)
+- [x] Context propagation: each span knows its parent (`tracing.py`, context variables)
+- [x] Interceptor in *record* mode at the LLM client and tool boundaries (D-016)
+- [x] Recordings store Gemini's raw request and response; thought signatures round-trip (C-005)
+- [x] SQLite trace store (SQLModel, `store.py`)
+- [x] Token accounting and cost per span, from Google's published prices (D-019)
+- [x] Retries with exponential backoff, a per-request timeout and a whole-run timeout (D-017)
+- [x] SDK surface: `lab.init`, `lab.wrap(client)`, `@lab.tool(kind="read" | "write")`, `@lab.agent(name)`
+- [x] CLI prints a run as an indented tree with tokens, cost and latency; `lab runs`, `lab show`
+- [x] Step spans group each model decision with its tool calls (D-015)
+- [x] **Demo:** `lab run support "..."` → tree printed in the terminal (live, Flash-Lite)
+- [x] **Learnings** written up
 - **Learn:** traces vs. spans vs. logs, parent/child context, OTel GenAI conventions, token
 accounting and cost calculation.
 - **Pitch:** none yet. This is the foundation.
 
-### Phase 2 — Evals and the decision tree UI · M–L · *parity milestone*
+### Phase 2 — Evals and the decision tree UI · M–L · *parity milestone* · ⏭️ Next
 
 - [ ] Task dataset format (input, expected outcome, checker)
 - [ ] Programmatic checkers

@@ -8,6 +8,7 @@ dependencies = [
     "google-genai",
     "pydantic>=2",
     "python-dotenv",
+    "sqlmodel>=0.0.48",
 ]
 
 [project.scripts]

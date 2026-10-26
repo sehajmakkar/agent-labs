@@ -289,3 +289,102 @@ entry's status line.
     choosing.
 - **Rationale:** A demo that fails because the model is unavailable is worse than one running a
   slightly weaker model. Reliability of the lab itself comes first.
+
+## D-015 — A "step" span between the agent and its calls
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude; flagged for Sehaj's review)
+- **Context:** In the OTel conventions, model calls (`chat`) and tool calls (`execute_tool`) are
+  siblings under the agent span. That gives a flat list, not the decision tree this project is
+  about.
+- **Options:** (a) follow OTel exactly: flat children under `invoke_agent`; (b) make tool spans
+  children of the `chat` span that asked for them; (c) add a `step N` span that wraps one model
+  call and the tool calls it requested.
+- **Decision:** (c). The tree is `invoke_agent` → `step N` → (`chat`, `execute_tool`…). Step spans
+  carry `agentlab.step.index` and `agentlab.llm.attempts`.
+- **Trade-offs:**
+  - Step spans aren't part of the OTel conventions, so other tools that read our traces will show
+    an extra layer they don't recognise. They appear as ordinary internal spans, so nothing breaks.
+  - Only our loop creates steps. A customer's own loop traced through `lab.wrap` and `@lab.tool`
+    gets the flat OTel shape, so the tree view must handle both shapes.
+  - (b) was rejected: a tool span would hang under a `chat` span that has already ended, which is
+    allowed but confusing to read.
+- **Rationale:** A step is one decision by the model plus its consequences, which is exactly what
+  Fork starts from (Phase 4) and what Blame points at (Phase 6).
+
+## D-016 — Interception wraps the provider SDK client, and tools record themselves
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Options:** (a) trace at our own `LLMClient.generate`; (b) wrap the provider SDK client
+  (`genai.Client`) so every `models.generate_content` call is traced.
+- **Decision:** (b) for model calls: `lab.wrap(genai.Client())` returns a stand-in that traces and
+  records each call and passes everything else through. For tool calls, `Tool.invoke` opens the
+  span, so a tool is traced whether our loop or a customer's code calls it. Recordings hold the
+  exact request (model, contents, config) and the raw response, keyed by a SHA-256 `request_hash`
+  of the request's canonical JSON.
+- **Trade-offs:**
+  - The wrapper only covers `models.generate_content`. Streaming, async (`client.aio`) and chats
+    pass through untraced for now.
+  - Recordings are Gemini-shaped, so each new provider needs its own wrapper.
+  - Every request is stored in full, conversation history included, so the database grows roughly
+    with the square of the number of steps. Fine at demo scale; deduplication can come later.
+- **Rationale:** The SDK client is the boundary every Gemini user has, whatever loop or framework
+  they run (D-004, D-009). Recording at that level captures exactly what Gemini received and
+  returned, which is what replay needs (Phase 3).
+
+## D-017 — Our own retries, with the SDK's retries switched off
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:** Model calls are retried in the loop (`retry.py`): up to 4 attempts, exponential
+  backoff (1s, 2s, 4s, capped at 16s) with jitter, only for transient failures (HTTP 408, 429,
+  500, 502, 503, 504 and network or timeout errors). The SDK client is created with
+  `HttpRetryOptions(attempts=1)`. Each request has a 60s timeout, and a whole run has a time limit
+  (`--timeout`, default 120s) checked before each step.
+- **Trade-offs:**
+  - More code than turning on the SDK's built-in retries.
+  - The run time limit is only checked between steps: one slow model call can overrun it by up
+    to the 60s request timeout.
+  - Jitter uses `random`, which Phase 3 will have to seed for exact replay.
+- **Rationale:** With the SDK retrying silently, failed attempts would never reach our traces, and
+  the README's Retry Rate metric couldn't be measured. It also covers the open part of C-007: when
+  Flash-Lite is overloaded, the run retries instead of failing.
+
+## D-018 — Tracing does nothing until `lab.init()` is called
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:** Spans are always created, but they are saved only when a store has been set up
+  with `lab.init(path)`. Without it, the same code runs and records nothing.
+- **Trade-offs:** Forgetting `lab.init()` silently records nothing, with no warning. A later phase
+  may add a warning, or an environment variable that switches recording on.
+- **Rationale:** Tests and plain library use need no database, and instrumented code never has to
+  check whether tracing is on. OpenTelemetry's no-op tracer works the same way.
+
+## D-019 — Cost is estimated from a price table in config
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:** `config.PRICES_PER_MILLION` holds paid-tier Standard prices from Google's pricing
+  page (checked 2026-10-27). Cost = input tokens × input price + (output + thinking tokens) ×
+  output price, because Google bills thinking tokens at the output price. Models without a price
+  show "cost unknown" instead of $0.
+- **Trade-offs:**
+  - Prices change: 3.8 Flash doubles on 2027-01-01, and the table must be updated by hand.
+  - A run's cost is computed when it is recorded and never recalculated.
+  - Free-tier keys pay nothing, so on the free tier the figure is what the run *would* cost.
+  - Cached-input discounts are ignored; we don't use context caching yet.
+- **Rationale:** Cost per task is a headline README metric and has to work offline from the
+  recorded usage. A hand-checked table is simple and honest about what it knows.
+
+## D-020 — Fork columns exist in the schema from the start
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:** `runs` already has `parent_run_id`, `fork_span_id` and `fork_override`, unused until
+  Phase 4. Tables are created with SQLModel's `create_all`, with no migration tool.
+- **Trade-offs:** Unused columns now. Without migrations, any later schema change means deleting
+  `.agentlab/lab.db` (losing local runs) or adding a migration tool such as Alembic at that point.
+- **Rationale:** Adding the known Phase 4 columns now avoids the first migration. A migration tool
+  would be one more thing to learn before it is needed.

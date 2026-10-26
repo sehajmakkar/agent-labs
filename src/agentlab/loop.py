@@ -3,16 +3,25 @@
 This is all an "agent" is mechanically. Frameworks such as LangGraph add structure around it, but
 underneath they do the same thing. We keep our own loop so that every model and tool call passes
 through code we control (decisions.md D-004).
+
+Each run is traced as a tree: `invoke_agent` → `step N` → the model call and the tool calls it
+asked for. A step is one decision by the model plus its consequences, which is the unit a fork
+will start from in Phase 4 (decisions.md D-015).
 """
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pydantic import ValidationError
-
+from agentlab import semconv
 from agentlab.llm.base import LLMClient, LLMResponse, Message, ToolCall, ToolResult, Usage
-from agentlab.tools import Tool
+from agentlab.retry import RetryPolicy, call_with_retries
+from agentlab.tools import Tool, describe_error
+from agentlab.tracing import agent_run, span
+
+RunStatus = Literal["completed", "max_steps", "timeout"]
+DEFAULT_RETRY = RetryPolicy()
 
 
 @dataclass(frozen=True)
@@ -29,14 +38,16 @@ class Step:
     index: int
     response: LLMResponse
     tool_results: list[ToolResult]
+    attempts: int = 1
 
 
 @dataclass
 class AgentResult:
     answer: str | None
-    status: Literal["completed", "max_steps"]
+    status: RunStatus
     steps: list[Step]
     messages: list[Message]
+    run_id: str | None = None
 
     @property
     def usage(self) -> Usage:
@@ -50,24 +61,55 @@ def run_agent(
     model: str,
     user_message: str,
     max_steps: int = 10,
-    on_step: Callable[[Step], None] | None = None,
+    timeout_s: float | None = None,
+    retry: RetryPolicy = DEFAULT_RETRY,
+    clock: Callable[[], float] = time.monotonic,
+) -> AgentResult:
+    """Run the agent on one message.
+
+    Stops when the model answers without calling a tool ("completed"), after `max_steps` model
+    calls ("max_steps"), or when `timeout_s` has passed before a new step starts ("timeout").
+    Model errors that survive the retries propagate, and the run is recorded as "error".
+    """
+    with agent_run(agent.name, input={"message": user_message}, model=model) as agent_span:
+        result = _loop(agent, llm, model, user_message, max_steps, timeout_s, retry, clock)
+        result.run_id = agent_span.run_id
+        agent_span.output = {"answer": result.answer}
+        agent_span.attributes[semconv.RUN_STATUS] = result.status
+        return result
+
+
+def _loop(
+    agent: Agent,
+    llm: LLMClient,
+    model: str,
+    user_message: str,
+    max_steps: int,
+    timeout_s: float | None,
+    retry: RetryPolicy,
+    clock: Callable[[], float],
 ) -> AgentResult:
     tools_by_name = {t.name: t for t in agent.tools}
     messages = [Message.user(user_message)]
     steps: list[Step] = []
+    deadline = clock() + timeout_s if timeout_s is not None else None
 
     for index in range(1, max_steps + 1):
-        response = llm.generate(
-            model=model, system=agent.system_prompt, messages=messages, tools=agent.tools
-        )
-        messages.append(response.message)
+        if deadline is not None and clock() >= deadline:
+            return AgentResult(None, "timeout", steps, messages)
 
-        results = [_execute(call, tools_by_name) for call in response.message.tool_calls]
-        step = Step(index=index, response=response, tool_results=results)
-        steps.append(step)
-        if on_step:
-            on_step(step)
+        with span("step", f"step {index}", attributes={semconv.STEP_INDEX: index}) as step_span:
+            response, attempts = call_with_retries(
+                lambda: llm.generate(
+                    model=model, system=agent.system_prompt, messages=messages, tools=agent.tools
+                ),
+                retry,
+            )
+            step_span.attributes[semconv.LLM_ATTEMPTS] = attempts
+            messages.append(response.message)
+            results = [_execute(call, tools_by_name) for call in response.message.tool_calls]
 
+        steps.append(Step(index, response, results, attempts))
         # No tool calls means the model has given its final answer.
         if not results:
             return AgentResult(response.message.text, "completed", steps, messages)
@@ -84,14 +126,17 @@ def _execute(call: ToolCall, tools_by_name: dict[str, Tool]) -> ToolResult:
     """
     tool = tools_by_name.get(call.name)
     if tool is None:
-        return ToolResult(call, {"error": f"Unknown tool: {call.name}"}, is_error=True)
+        error = f"Unknown tool: {call.name}"
+        attributes = {
+            semconv.OPERATION_NAME: "execute_tool",
+            semconv.TOOL_NAME: call.name,
+            semconv.TOOL_CALL_ID: call.id,
+        }
+        with span("tool", f"execute_tool {call.name}", input=call.args, attributes=attributes) as s:
+            s.error = error
+        return ToolResult(call, {"error": error}, is_error=True)
     try:
-        output = tool.invoke(call.args)
-    except ValidationError as e:
-        problems = "; ".join(
-            f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()
-        )
-        return ToolResult(call, {"error": f"Invalid arguments: {problems}"}, is_error=True)
+        output = tool.invoke(call.args, call_id=call.id)
     except Exception as e:
-        return ToolResult(call, {"error": f"{type(e).__name__}: {e}"}, is_error=True)
+        return ToolResult(call, {"error": describe_error(e)}, is_error=True)
     return ToolResult(call, output if isinstance(output, dict) else {"result": output})

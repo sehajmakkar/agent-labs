@@ -138,3 +138,64 @@ Blame has to catch.
 Both runs reported 0 thinking tokens on Flash-Lite. Thinking is either off or minimal by default for
 this model. Token and cost accounting (Phase 1) must still handle thinking tokens, because Flash
 and other settings do produce them.
+
+## 2026-10-27 — Phase 1: tracing
+
+### Traces, spans and logs
+- A **log** is a line of text about something that happened. It has no structure linking it to
+  anything else.
+- A **span** is one timed unit of work, with a start, a duration, inputs, outputs, an error if any,
+  and a **parent**. Here: the agent, one step, one model call, one tool call.
+- A **trace** is all the spans of one request, linked by their parents into a tree. Here, one
+  *run* of an agent is one trace.
+
+Logs tell you *that* something happened. A trace tells you *where in the flow* it happened and
+what caused it, which is what "find the step that went wrong" needs.
+
+### Context propagation with `contextvars`
+Nobody passes a "parent span" argument down through the agent. `tracing.py` keeps the current span
+in a `ContextVar`; opening a span reads it as the parent and sets itself as current, and closing it
+puts the old value back. So a tool called four levels deep still attaches to the right step.
+`ContextVar` rather than a global matters once runs execute in threads or async tasks (parallel
+forks in Phase 4): each gets its own current span.
+
+### Spans are saved when they end, so order needs its own column
+Children finish before their parents, so the store receives `execute_tool` before `step 1` and
+`step 1` before `invoke_agent`. Each span gets a `seq` number when it *starts*, and the tree is
+rebuilt by sorting on it.
+
+### OTel GenAI conventions in practice (v1.41.0)
+- Operation names: `chat` for model calls, `execute_tool`, `invoke_agent`. Span names follow
+  "operation target", e.g. `chat gemini-3.5-flash-lite`.
+- The provider value for the Gemini Developer API is `gcp.gemini`; Vertex AI is `gcp.vertex_ai`.
+- `gen_ai.usage.output_tokens` should *include* reasoning tokens, and
+  `gen_ai.usage.reasoning.output_tokens` reports them separately. Gemini's `candidates_token_count`
+  *excludes* thinking, so the wrapper adds the two together for the OTel attribute.
+- The registry page now marks these attributes as moved to the new
+  `semantic-conventions-genai` repository. The names are the same; the spec is still in
+  Development.
+
+### Cost
+cost = input × input price + (output + thinking) × output price, per million tokens. Google
+bills thinking at the output price. On Flash-Lite ($0.30 in, $2.50 out) the 3-step support run
+cost about $0.00055, and output tokens are over 8× more expensive than input. A verbose model
+costs more than a long prompt.
+
+### Retries: exponential backoff with jitter
+Retry only failures that can pass (429 rate limit, 503 overload, timeouts), never a 400 bad
+request or a 404 unknown model, because those fail the same way every time. Wait 1s, 2s, 4s…
+(exponential) so an overloaded server gets room to recover. Randomise each wait (jitter) so many
+clients that failed together don't all retry at the same instant.
+
+### Recording for replay: request hashing
+Each model and tool call stores its exact request and response. The request is serialised to
+canonical JSON (sorted keys, fixed separators) and hashed with SHA-256, so the same request always
+gives the same hash. In Phase 3, replay answers a call by looking up its hash instead of calling
+Gemini. Gemini's `thought_signature` bytes are stored as base64 in JSON mode and decode back to the
+exact bytes; a test checks this.
+
+### Seen live: same question, different path
+The same message ("Was I charged twice for order 4417?") ran in **2 steps** in Phase 0 (both tools
+called in parallel) and in **3 steps** in Phase 1 (`get_payments`, then `get_order`, then the
+answer). Both answers were right. That is the nondeterminism from C-001, seen for real: one run
+proves little, which is why forks run N times and why Trajectory Diff exists.

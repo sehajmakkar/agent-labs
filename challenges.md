@@ -39,6 +39,9 @@ Entries marked _anticipated_ were identified during planning and have not been h
 - **Update 2026-10-27 (Phase 0):** Half done. Within a live run, model turns are resent as the raw
   `Content`, and a test checks that a `thought_signature` survives (decisions.md D-012). Still open:
   serializing that raw content into Recordings (Phase 1) and replaying from it (Phase 3).
+- **Update 2026-10-27 (Phase 1):** Recordings now hold the exact request and the raw response in
+  JSON mode. A test checks that a binary `thought_signature` survives storage and decodes back to
+  the same bytes. Remaining: replaying from the recordings (Phase 3).
 
 ## C-006 — Gemini model IDs not yet confirmed _(resolved)_
 - **Problem:** Sources disagreed on the current Flash and Flash-Lite IDs. The defaults
@@ -54,3 +57,23 @@ Entries marked _anticipated_ were identified during planning and have not been h
 - **Resolution:** Resolved 2026-10-27 by making Flash-Lite the default (decisions.md D-014). Not
   yet handled: what a run should do if Flash-Lite itself returns an overload error. That belongs
   with the retries work in Phase 1.
+- **Update 2026-10-27 (Phase 1):** Overload (503), rate limits (429) and timeouts are now retried
+  with exponential backoff, up to 4 attempts, and every attempt is traced (decisions.md D-017).
+
+## C-008 — Spans arrive in the store in the wrong order _(resolved)_
+- **Problem:** A span is saved when it ends, and children end before their parents. Ordering by
+  insert time would print each step's tools before the step itself.
+- **Resolution:** Each span gets a `seq` number from a per-run counter when it *starts*. The tree
+  is rebuilt from `parent_span_id` and sorted by `seq` (decisions.md D-015).
+
+## C-009 — SQLite forgets timezones _(resolved)_
+- **Problem:** Times were stored as timezone-aware UTC, but SQLite has no timezone type, so they
+  came back without one. `lab runs` printed UTC as if it were local time (5h30 off in IST).
+- **Resolution:** Store UTC, and on display treat the value as UTC and convert it to local time.
+  Durations are unaffected, because both ends lose the timezone the same way.
+
+## C-010 — Recorded requests grow with every step _(open, accepted for now)_
+- **Problem:** Each model call sends the whole conversation so far, and we record each request in
+  full. A run with N steps stores about N²/2 turns of history.
+- **Resolution:** Accepted at demo scale (decisions.md D-016). If it matters, store each turn once
+  and have recordings point to the turns.

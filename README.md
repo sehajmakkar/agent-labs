@@ -34,26 +34,26 @@ The lab never hosts your agent. Your agent keeps running in your own code. The l
  └───────────────────────────────┘  fork jobs └──────────────────────────────┘
 ```
 
-1. **Instrument once.** Install the SDK, wrap your LLM client, and mark your tools and entry point *(planned API)*:
+1. **Instrument once.** Install the SDK, wrap your LLM client, and mark your tools and entry point:
 
    ```python
    import agentlab as lab
    from google import genai
 
-   client = lab.wrap(genai.Client())  # every model call is recorded
+   lab.init(".agentlab/lab.db")          # where runs are saved
+   client = lab.wrap(genai.Client())     # every model call is traced and recorded
 
-
-   @lab.tool(kind="read")  # safe to call again during a fork
+   @lab.tool(kind="read")                # safe to call again during a fork
    def get_payments(order_id: str): ...
 
-
-   @lab.tool(kind="write")  # never re-executed; served from a recording or a simulator
+   @lab.tool(kind="write")               # never re-executed; served from a recording or a simulator
    def refund(payment_id: str): ...
 
-
-   @lab.agent("support")
+   @lab.agent("support")                 # each call becomes a run
    def support_agent(message: str): ...
    ```
+
+   Recording works today. Replay, fork and the `read`/`write` guarantees arrive in later phases.
 
 2. **Run it where you already do.** Local development, a CI eval suite (`lab eval tasks.yaml`), or production with sampling. Every run becomes a replayable trace.
 3. **Debug in the UI.** Open a failed run, then **Blame** → **Fork** from the blamed step with a fix → **Diff** the branches. Forks are run by `lab worker`, a process inside your repo, so they use your real agent code.
@@ -117,10 +117,12 @@ Requires Python 3.12+, [uv](https://docs.astral.sh/uv/) and a Gemini API key.
 uv sync
 cp .env.example .env          # then add GEMINI_API_KEY
 uv run lab models             # check which Gemini Flash models your key can use
-uv run lab run support "Was I charged twice for order 4417?"
+uv run lab run support "Was I charged twice for order 4417?"   # prints the run's trace tree
+uv run lab runs               # recent runs
+uv run lab show <run-id>      # any saved run's tree (an ID prefix is enough)
 uv run pytest                 # offline tests, no API key needed
 ```
 
 ## Project Status
 
-Early-stage project, built in phases. Phase 0 (a tool-calling agent on Gemini) is done. Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.
+Early-stage project, built in phases. Done so far: a tool-calling agent on Gemini, and tracing of every run into a local trace store. Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.

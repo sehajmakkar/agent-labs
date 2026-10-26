@@ -1,17 +1,37 @@
-"""Gemini provider: converts between our neutral types and the `google-genai` SDK."""
+"""Gemini provider: converts between our neutral types and the `google-genai` SDK.
+
+It also holds `wrap_genai_client`, the model-call interception boundary (decisions.md D-004):
+every `generate_content` call made through a wrapped client becomes a `chat` span with a recording
+of the exact request and raw response.
+"""
 
 from typing import Any
 
+import httpx
 from google import genai
-from google.genai import types
+from google.genai import errors, types
+from pydantic import BaseModel
 
-from agentlab.llm.base import LLMResponse, Message, ToolCall, Usage
+from agentlab import semconv
+from agentlab.cost import cost_usd
+from agentlab.llm.base import LLMResponse, Message, ToolCall, TransientLLMError, Usage
 from agentlab.tools import Tool
+from agentlab.tracing import span
+
+# HTTP statuses worth retrying: timeout, rate limit, and server-side failures or overload.
+TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 class GeminiClient:
-    def __init__(self, api_key: str | None = None, client: Any = None):
-        self._client = client or genai.Client(api_key=api_key)
+    def __init__(self, api_key: str | None = None, client: Any = None, timeout_s: float = 60):
+        if client is None:
+            http_options = types.HttpOptions(
+                timeout=int(timeout_s * 1000),
+                # One attempt only: retries happen in our loop, so each one is traced (retry.py).
+                retry_options=types.HttpRetryOptions(attempts=1),
+            )
+            client = wrap_genai_client(genai.Client(api_key=api_key, http_options=http_options))
+        self._client = client
 
     def generate(
         self, *, model: str, system: str, messages: list[Message], tools: list[Tool]
@@ -25,9 +45,16 @@ class GeminiClient:
             # goes through our own loop, where it can be traced and later replayed.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
-        response = self._client.models.generate_content(
-            model=model, contents=to_contents(messages), config=config
-        )
+        try:
+            response = self._client.models.generate_content(
+                model=model, contents=to_contents(messages), config=config
+            )
+        except errors.APIError as e:
+            if e.code in TRANSIENT_STATUS_CODES:
+                raise TransientLLMError(f"Gemini API error {e.code}: {e.message}") from e
+            raise
+        except httpx.TransportError as e:  # timeouts and dropped connections
+            raise TransientLLMError(f"{type(e).__name__}: {e}") from e
         return from_response(response, model)
 
     def list_models(self) -> list[types.Model]:
@@ -98,3 +125,74 @@ def from_response(response: types.GenerateContentResponse, model: str) -> LLMRes
     )
     message = Message(role="model", text=text, tool_calls=tool_calls, raw=content)
     return LLMResponse(message=message, usage=usage, model=model)
+
+
+def wrap_genai_client(client: genai.Client) -> "TracedGenAIClient":
+    return TracedGenAIClient(client)
+
+
+class TracedGenAIClient:
+    """Stands in for `genai.Client`: traces `models.generate_content`, passes the rest through."""
+
+    def __init__(self, client: Any):
+        self._client = client
+        self.models = _TracedModels(client.models)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
+class _TracedModels:
+    def __init__(self, models: Any):
+        self._models = models
+
+    def generate_content(
+        self, *, model: str, contents: Any, config: types.GenerateContentConfig | None = None
+    ) -> types.GenerateContentResponse:
+        attributes = {
+            semconv.OPERATION_NAME: "chat",
+            semconv.PROVIDER_NAME: semconv.PROVIDER_GEMINI,
+            semconv.REQUEST_MODEL: model,
+        }
+        with span("llm", f"chat {model}", attributes=attributes) as s:
+            response = self._models.generate_content(model=model, contents=contents, config=config)
+            s.record(_request_json(model, contents, config), _dump(response))
+
+            parsed = from_response(response, model)
+            s.input_tokens = parsed.usage.input_tokens
+            s.output_tokens = parsed.usage.output_tokens
+            s.thinking_tokens = parsed.usage.thinking_tokens
+            s.cost_usd = cost_usd(model, parsed.usage)
+            s.output = {
+                "text": parsed.message.text,
+                "tool_calls": [{"name": c.name, "args": c.args} for c in parsed.message.tool_calls],
+            }
+            s.attributes.update(
+                {
+                    semconv.RESPONSE_MODEL: response.model_version,
+                    semconv.RESPONSE_FINISH_REASONS: [
+                        c.finish_reason for c in response.candidates or [] if c.finish_reason
+                    ],
+                    semconv.USAGE_INPUT_TOKENS: parsed.usage.input_tokens,
+                    # The spec counts reasoning inside output tokens; Gemini reports it separately.
+                    semconv.USAGE_OUTPUT_TOKENS: parsed.usage.output_tokens
+                    + parsed.usage.thinking_tokens,
+                    semconv.USAGE_REASONING_OUTPUT_TOKENS: parsed.usage.thinking_tokens,
+                }
+            )
+            return response
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._models, name)
+
+
+def _dump(value: Any) -> Any:
+    # JSON mode encodes bytes such as thought signatures as base64, and decodes them on load.
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json", exclude_none=True)
+    return value
+
+
+def _request_json(model: str, contents: Any, config: Any) -> dict[str, Any]:
+    items = contents if isinstance(contents, list) else [contents]
+    return {"model": model, "contents": [_dump(c) for c in items], "config": _dump(config)}
