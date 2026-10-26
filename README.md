@@ -40,13 +40,16 @@ The lab never hosts your agent. Your agent keeps running in your own code. The l
    import agentlab as lab
    from google import genai
 
-   client = lab.wrap(genai.Client())        # every model call is recorded
+   client = lab.wrap(genai.Client())  # every model call is recorded
 
-   @lab.tool(kind="read")                   # safe to call again during a fork
+
+   @lab.tool(kind="read")  # safe to call again during a fork
    def get_payments(order_id: str): ...
 
-   @lab.tool(kind="write")                  # never re-executed; served from a recording or a simulator
+
+   @lab.tool(kind="write")  # never re-executed; served from a recording or a simulator
    def refund(payment_id: str): ...
+
 
    @lab.agent("support")
    def support_agent(message: str): ...
@@ -97,58 +100,6 @@ Agents already traced with OpenTelemetry (for example from LangGraph) can be imp
 - **Fork Fix Rate:** Percentage of forks from a blamed step that turn a failure into a success.
 - **Robustness Score** *(stretch)*: Task success under injected tool faults, relative to the clean baseline.
 
-## Potential Target Companies
-
-Companies to study, learn from, or approach for relevant engineering opportunities. This list does **not** imply they are currently hiring or that every role is suitable. Tiers show how directly this project relates to what each company builds.
-
-### Tier 1 — Agent evaluation, observability & reliability (direct fit)
-
-| Company | What they do | Pitch angle |
-|---|---|---|
-| Maxim AI | Simulation, evals, and observability | Simulation finds failures; Fork & Blame verifies the fix |
-| Agnost AI | Conversation analytics: intents, sentiment, frustration | They show *what users felt*; this shows *why the agent failed* |
-| BentoLabs | Silent-failure detection, root cause, suggested fixes | Auto-Blame with fork-based verification of the suggested fix |
-| Sentrial | Production monitoring for agent reliability | Go from a reliability alert to the blamed step and a verified fix |
-| Laminar | Open-source agent tracing; debugger reruns from a span | They let you rerun; this says *where* (Blame), proves it (pass rate over N forks), and diffs the result |
-| Raga AI | Agent tracing and evaluation (Catalyst) | Trajectory diff and fork-from-step |
-| Athina AI | LLM monitoring and evals | Turn monitored failures into blamed, replayable tests |
-| Cekura | Testing and monitoring for voice and chat agents | Chaos testing for tools; replay of failed conversations |
-| Coval | Simulation and evals for voice agents | Fork a simulated conversation from the turn that failed |
-| Future AGI | Evals and observability | Blame Accuracy as a measurable eval metric |
-| Langfuse | Open-source LLM observability | OTel-compatible traces plus replay and fork |
-| Braintrust | Evals and experiment tracking | Trajectory diff between experiment versions |
-| Arize (Phoenix) | LLM tracing and evals | OTel GenAI traces in, Fork & Blame out |
-| Galileo | Agent evaluation and guardrails | Verified root cause instead of a score |
-| LangWatch | Agent monitoring and evals | Regression tests generated from blamed failures |
-
-### Tier 2 — Agent builders & agent tooling (they need this)
-
-| Company | What they do | Pitch angle |
-|---|---|---|
-| DrDroid | AI SRE agent for production incidents | Root-cause analysis, applied to the agent itself |
-| TestMu AI | KaneAI testing agent, agent-to-agent testing | Chaos and regression testing for agents |
-| Composio | Managed tool and integration layer | How agents behave when tools fail (chaos testing) |
-| Metorial | MCP gateway and integrations | Tool-reliability metrics and fault injection at the MCP layer |
-| Dexto | Open agent harness | Plug-in tracing and replay for harness users |
-| Lyzr | Enterprise agent platform | Debuggability and regression gates for enterprise agents |
-| UnifyApps | Enterprise agentic platform | Same as above |
-| Ressl AI | Custom enterprise agents | Prove reliability of delivered agents to clients |
-| CodeAnt AI | AI code review | Regression gates for AI-driven pipelines |
-| Browser Use | Browser agents | Fork a long browser run from the step that failed |
-| All Hands AI (OpenHands) | Coding agents | Blame and diff for long coding trajectories |
-
-### Tier 3 — AI infrastructure & platforms
-
-| Company | What they do | Pitch angle |
-|---|---|---|
-| Portkey | AI gateway, observability, guardrails | Cost and latency analysis per step; gateway-level tracing |
-| TrueFoundry | AI and MCP gateway, self-hosted platform | MCP-level tracing, self-hostable replay |
-| Scalekit | Auth for agents and apps | Tracing of auth and tool-permission failures |
-
-### Tier 4 — AI applications & media agents
-
-Cardboard, Clueso, Trupeer, InVideo, Spyne.ai — teams running agent pipelines in production. Pitch angle: make multi-step generation pipelines debuggable and regression-tested.
-
 ## Guiding Principles
 
 - Reproducible evaluations over anecdotal demos.
@@ -158,6 +109,18 @@ Cardboard, Clueso, Trupeer, InVideo, Spyne.ai — teams running agent pipelines 
 - Measure reliability, latency, and cost together.
 - Keep evaluation results actionable for developers.
 
+## Quickstart
+
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/) and a Gemini API key.
+
+```bash
+uv sync
+cp .env.example .env          # then add GEMINI_API_KEY
+uv run lab models             # check which Gemini Flash models your key can use
+uv run lab run support "Was I charged twice for order 4417?"
+uv run pytest                 # offline tests, no API key needed
+```
+
 ## Project Status
 
-Early-stage project, planned in phases (see [PLAN.md](PLAN.md)). Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.
+Early-stage project, built in phases. Phase 0 (a tool-calling agent on Gemini) is done. Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.

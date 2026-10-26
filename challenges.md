@@ -36,3 +36,21 @@ Entries marked _anticipated_ were identified during planning and have not been h
   the live steps after a fork see a different conversation than the original did.
 - **Resolution:** Open. Plan: store the raw response parts in each Recording and rebuild history
   from them, never from our own simplified copy. Check the Gemini function-calling docs in Phase 1.
+- **Update 2026-10-27 (Phase 0):** Half done. Within a live run, model turns are resent as the raw
+  `Content`, and a test checks that a `thought_signature` survives (decisions.md D-012). Still open:
+  serializing that raw content into Recordings (Phase 1) and replaying from it (Phase 3).
+
+## C-006 — Gemini model IDs not yet confirmed _(resolved)_
+- **Problem:** Sources disagreed on the current Flash and Flash-Lite IDs. The defaults
+  (`gemini-3.8-flash`, `gemini-3.5-flash-lite`) come from Google's docs, but they couldn't be checked
+  against the live API because no API key was available during Phase 0.
+- **Resolution:** Resolved 2026-10-27. With Sehaj's key, `uv run lab models` showed both
+  `gemini-3.8-flash` and `gemini-3.5-flash-lite` as available. The command stays useful: it marks
+  the configured IDs and exits non-zero if one disappears.
+
+## C-007 — Gemini Flash is sometimes unavailable _(resolved)_
+- **Problem:** Sehaj has seen Gemini Flash become unavailable at times. A demo or a long eval run
+  that hits this fails halfway through.
+- **Resolution:** Resolved 2026-10-27 by making Flash-Lite the default (decisions.md D-014). Not
+  yet handled: what a run should do if Flash-Lite itself returns an overload error. That belongs
+  with the retries work in Phase 1.

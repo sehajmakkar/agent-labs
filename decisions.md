@@ -1,7 +1,9 @@
 # Decisions
 
-Append-only log. Format: ID, date, status, who raised it, context, options, decision, rationale.
-To change a decision, add a new entry that supersedes the old one.
+Append-only log. Each entry records: ID, date, status, who raised it, context, options, the
+decision, its **trade-offs** (what we give up, and why we accept that), and the rationale.
+To change a decision, add a new entry that supersedes the old one, and point to it from the old
+entry's status line.
 
 ---
 
@@ -12,6 +14,9 @@ To change a decision, add a new entry that supersedes the old one.
 - **Raised by:** Sehaj
 - **Decision:** Maintain `CLAUDE.md`, `decisions.md`, `learnings.md` and `challenges.md` at the repo
   root for the whole life of the project.
+- **Trade-offs:** Writing docs takes time away from code, and docs go stale if nobody updates them.
+  Accepted because the docs *are* part of the output (study material, interview stories). Going
+  stale is handled by the rule that docs are updated in the same change that causes the entry.
 - **Rationale:** The project is a learning vehicle as much as a demo; recording decisions, learnings
   and challenges as they happen produces study material and interview talking points.
 
@@ -35,6 +40,11 @@ To change a decision, add a new entry that supersedes the old one.
 - **Decision:** Build **Fork & Replay + Auto-Blame + Trajectory Diff** as the differentiator, with
   **Chaos Testing** as a stretch phase. Failure → regression test (5) is folded into the regression
   phase. The cost profiler (6) is dropped for now.
+- **Trade-offs:**
+  - Three features plus a stretch goal is a big scope, with a risk of finishing none of them well.
+    The phase order (D-007) handles this: Phase 4 (Fork) is pitchable on its own.
+  - Dropping the cost profiler weakens the pitch to gateway companies (Portkey, TrueFoundry).
+  - Fork alone is not unique (see D-008), so the value rests on the combination.
 - **Rationale:** It finishes the original "find where the agent goes wrong in one click" idea. All
   four features share one replay engine. Fork-to-verify is missing from the main platforms (Maxim,
   Agnost, Raga AI, Langfuse). Learning value is high.
@@ -47,6 +57,16 @@ To change a decision, add a new entry that supersedes the old one.
 - **Options:** (a) Python backend + React/TypeScript UI; (b) TypeScript end to end.
 - **Decision:** (a) Python 3.12, FastAPI, SQLite via SQLModel (Postgres later), React + Vite +
   React Flow for the tree UI. **No LangGraph/LangChain in the core** (see D-004).
+- **Trade-offs:**
+  - Two languages and two toolchains instead of one; TypeScript end to end would share types
+    between the API and the UI.
+  - Python is slower than Rust (which Laminar uses) for high-volume trace ingestion. That doesn't
+    matter at demo scale.
+  - SQLite allows only one writer at a time, so many parallel fork runs will queue. Fine locally;
+    Postgres is the way out.
+  - React Flow is a dependency with its own layout limits, but it saves building a tree renderer.
+  - Without LangGraph we build retries and state handling ourselves, and the demo doesn't run on
+    the framework many customers use until the Phase 9 adapter.
 - **Rationale:**
   - *Python:* the SDKs of the target companies (Langfuse, Raga AI, Agnost, Maxim) and most agent
     frameworks are Python-first, so our SDK looks familiar to them. Gemini's `google-genai` SDK is
@@ -81,21 +101,31 @@ To change a decision, add a new entry that supersedes the old one.
   Vendors therefore support *both* framework users and custom-loop users. Frameworks commonly seen:
   LangGraph, the OpenAI Agents SDK, Google ADK, the Claude Agent SDK, Vercel AI SDK, CrewAI and
   Pydantic AI.
+- **Trade-offs:**
+  - More code to own and maintain.
+  - Our loop is simpler than real production agents (no multi-agent setups or human approval
+    steps yet), so the demo may look like a toy to some reviewers.
+  - Boundary interception only sees what crosses the model and tool boundaries, not a framework's
+    internal state (for example LangGraph's graph state). Forks rebuild state by replaying calls,
+    not by restoring snapshots.
 - **Rationale:** Replay needs control over every LLM and tool call. Boundary interception keeps us
   framework-agnostic, like the vendors above. Writing the loop is the best way to learn.
 
 ## D-005 — LLM provider
 
 - **Date:** 2026-10-27
-- **Status:** Accepted (2026-10-27, Sehaj)
+- **Status:** Accepted (2026-10-27, Sehaj). **Default model tier changed by D-014.**
 - **Raised by:** Claude; provider chosen by Sehaj
 - **Decision:** **Gemini** through the `google-genai` Python SDK, behind a thin provider interface
   of our own.
-  - **Flash** runs the main agent and the blame judge.
+  - **Flash** runs the main agent and the blame judge. *(Superseded by D-014: Flash-Lite is now
+    the default for inference.)*
   - **Flash-Lite** runs bulk eval sweeps and cheap fork samples.
-  - Model IDs live in config, never in code. Google's docs list `gemini-3.8-flash` and
-    `gemini-3.5-flash-lite` as current, and sources disagree, so confirm with `client.models.list()`
-    in Phase 0.
+  - Model IDs live in config, never in code. Confirmed on 2026-10-27 with `lab models`:
+    `gemini-3.8-flash` and `gemini-3.5-flash-lite` (challenges.md C-006).
+- **Trade-offs:** With a single provider the demo can't compare providers (Gemini vs. Claude vs.
+  GPT), which some eval companies care about. The neutral interface (D-012) keeps a second provider
+  cheap to add later.
 - **Rationale:** The interface keeps recordings independent of the provider. Having two tiers of the
   same family gives a ready-made demo: diff Flash against Flash-Lite on the same task to show what
   the cheaper model skips.
@@ -107,6 +137,8 @@ To change a decision, add a new entry that supersedes the old one.
 - **Raised by:** Claude
 - **Decision:** Our own schema (Run, Span, Recording) with field names aligned to the OTel GenAI
   semantic conventions at a pinned version. OTLP export/import later.
+- **Trade-offs:** We will have to write a converter to and from OTLP later. Pinned attribute names
+  may drift from the spec as it changes, so we re-check them when we build the converter.
 - **Rationale:** The GenAI conventions are still in Development status. Aligning names now and
   depending on the spec later avoids churn while staying interoperable.
 
@@ -116,6 +148,9 @@ To change a decision, add a new entry that supersedes the old one.
 - **Status:** Accepted
 - **Raised by:** Claude (PLAN.md), approved by Sehaj with the plan
 - **Decision:** Replay (3) → Fork (4) → Diff (5) → Blame (6), and outreach starts after Phase 4.
+- **Trade-offs:** The headline feature (Blame) comes last of the three. If time runs out, the most
+  impressive part is missing. Accepted because Blame can't be built without forks, and Phase 4 is
+  already a demo worth pitching.
 - **Rationale:** Fork needs replay. Blame verifies its guesses with forks and is clearer to show
   alongside a diff, so it comes last of the three. Phase 4 is the first demo that differs from what
   the target companies already ship.
@@ -139,6 +174,10 @@ To change a decision, add a new entry that supersedes the old one.
   Supporting points: overrides can change a tool's *output*, not just prompts; it works with any
   framework through boundary interception; and Blame Accuracy is measured on planted bugs.
   Chaos testing stays a stretch phase after these three.
+- **Trade-offs:**
+  - "Blame, prove, diff" takes longer to explain than "we fork".
+  - The full claim only holds once Phases 4–6 exist.
+  - Statements about competitors go stale, so re-check them before each pitch.
 - **Rationale:** An honest pitch survives a technical interviewer who knows Laminar. "They let you
   rerun; we tell you where and prove it" is a clear upgrade.
 
@@ -157,5 +196,96 @@ To change a decision, add a new entry that supersedes the old one.
     forked, because forking needs to re-run the user's code.
 
   Our demo ships its own agents (support, incident triage), which play the customer's role.
+- **Trade-offs:**
+  - Running a worker process is more setup than a hosted sandbox where you just paste your agent.
+  - Imported traces can't be forked.
+  - A worker that runs code when the server tells it to is a security surface: fork jobs will need
+    authentication before anything leaves localhost.
 - **Rationale:** This is how Sentry, Langfuse and Laminar fit into a team's workflow. The agent stays
   where it already runs, and the lab adds recording and a control panel.
+
+## D-010 — Target company list lives in PLAN.md, not the README
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Sehaj confirmed keeping it in PLAN.md, 2026-10-27)
+- **Raised by:** Sehaj
+- **Decision:** The tiered company list and pitch angles moved from README.md to PLAN.md
+  ("Target Companies"). The README no longer links to PLAN.md.
+- **Trade-offs:** If the repository is public, PLAN.md can still be found by anyone who browses it.
+  Sehaj accepted this.
+- **Rationale:** The README is shown to the companies themselves. A list of other targets and pitch
+  angles doesn't belong in front of them.
+
+## D-011 — Phase 0 tooling and layout
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude, within the approved stack; open to change)
+- **Decision:**
+  - `uv` for environments and dependencies (Python 3.12 pinned in `.python-version`).
+  - `ruff` for lint and formatting; `pytest` for tests.
+  - `argparse` for the CLI (no extra dependency).
+  - `pydantic` to build tool schemas from type hints. It is already a dependency of `google-genai`.
+  - Layout: `src/agentlab/` is the SDK and core (PLAN.md's `core/`), `agents/` holds the demo
+    agents, `tests/` holds the tests. `api/` and `ui/` are created in the phases that need them.
+- **Trade-offs:**
+  - `argparse` is wordier than Typer or Click, and its help output is plainer.
+  - `uv` is less familiar to some reviewers than plain pip, but `pip install -e .` still works
+    because everything is in `pyproject.toml`.
+  - The `src/` layout needs an install step, which `uv sync` handles.
+- **Rationale:** Standard, fast and few dependencies. The `src/` layout keeps tests honest: they
+  import the installed package, not files that happen to sit next to them.
+
+## D-012 — Provider-neutral messages that carry the raw provider response
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude; flagged for Sehaj's review)
+- **Options:** (a) the loop works on Gemini's own `Content` objects; (b) our own `Message`,
+  `ToolCall` and `ToolResult` types, with each model message keeping the original response in `raw`.
+- **Decision:** (b). When building the next request, the Gemini adapter resends `raw` unchanged and
+  only rebuilds a model turn from our fields when no raw response exists.
+- **Trade-offs:**
+  - Every model turn exists twice (our fields and `raw`), and the two could disagree if someone
+    edits one but not the other. Fork overrides must therefore edit through one function that
+    updates both.
+  - The `raw` part of a recording is Gemini-specific, so a recording can't simply be replayed on
+    another provider.
+  - Each provider needs its own conversion code.
+- **Rationale:** The loop, and later the trace store and replay, stay independent of the provider.
+  Resending the raw response preserves Gemini's thought signatures exactly (challenges.md C-005).
+
+## D-013 — Tool failures are returned to the model, never raised
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:** An unknown tool, invalid arguments, or an exception inside a tool becomes a result
+  like `{"error": "..."}` marked `is_error`, and goes back to the model. The loop never crashes on a
+  tool failure.
+- **Trade-offs:**
+  - A genuine bug in our own tool code also looks like an ordinary tool error to the agent, so
+    traces must show `is_error` and the error type clearly or the bug gets lost.
+  - A model can keep retrying a broken tool; `max_steps` puts a ceiling on that.
+- **Rationale:** Handling tool errors is part of the agent's job. An agent that ignores them is the
+  failure this lab is built to catch (see the worked example in learnings.md), so the errors must
+  stay visible inside the run.
+
+## D-014 — Flash-Lite is the default model for inference
+
+- **Date:** 2026-10-27
+- **Status:** Accepted
+- **Raised by:** Sehaj
+- **Context:** In Sehaj's experience Gemini Flash is sometimes unavailable, which would break demos
+  and long eval runs halfway through.
+- **Options:** (a) keep Flash as the default; (b) make Flash-Lite the default and keep Flash
+  selectable; (c) default to Flash and fall back to Flash-Lite automatically when it is unavailable.
+- **Decision:** (b). `lab run` defaults to `--model flash-lite`; `--model flash` still works.
+  Partly supersedes D-005.
+- **Trade-offs:**
+  - Flash-Lite is less capable, so the agent will make more mistakes and the blame judge may be
+    weaker. For a reliability lab, more natural failures are useful material, not only a cost.
+  - It is cheaper and faster, which matters when every fork runs N times.
+  - Option (c) was not chosen: a silent fallback would mix two models inside one experiment and
+    make results hard to compare. If we ever add a fallback, it must be recorded on the span.
+  - Revisit for the blame judge in Phase 6: measure Blame Accuracy with both models before
+    choosing.
+- **Rationale:** A demo that fails because the model is unavailable is worse than one running a
+  slightly weaker model. Reliability of the lab itself comes first.

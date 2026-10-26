@@ -78,3 +78,63 @@ Customer: *"I was charged twice for order 4417, please refund the duplicate."*
 - **Diff:** original vs. fork are identical for steps 1–3 and split at step 4 (`refund("P-1001")`
   vs. a retried `get_payments`). The fork has 2 extra steps, about 900 more tokens, and the outcome
   goes from fail to pass.
+
+## 2026-10-27 — Phase 0: what an agent loop actually is
+
+### The loop
+An agent is a `for` loop (`src/agentlab/loop.py`):
+1. Send the conversation so far, plus the list of tools, to the model.
+2. If the reply asks for tool calls, run them and append the results to the conversation.
+3. Go back to 1. If the reply has no tool calls, that reply is the final answer.
+4. Stop after `max_steps` regardless, so a confused agent can't loop forever.
+
+The model never runs anything itself. It only *asks* for a tool by name with arguments, and our
+code decides whether and how to run it. That is why every tool call can be traced, replayed or
+faked: it all goes through our code.
+
+### Function calling on Gemini (`google-genai` 2.33)
+- Tools are described to the model as `FunctionDeclaration(name, description,
+  parameters_json_schema)`. The model only sees the name, the description and the JSON Schema, so the
+  docstring *is* the tool's documentation for the model.
+- A tool request arrives as a `function_call` part (`id`, `name`, `args`) in the model's reply.
+- Results go back as `function_response` parts in a **user**-role turn, matched to their call by
+  `id`.
+- The SDK can call Python functions automatically. We turn that off
+  (`AutomaticFunctionCallingConfig(disable=True)`) so the calls go through our loop.
+- Parts with `thought=True` are thinking summaries, not the answer. Parts can also carry a
+  `thought_signature`, which must be sent back exactly as received. We do that by resending the raw
+  `Content` (decisions.md D-012).
+- Usage metadata splits tokens into prompt, candidates (output) and thoughts (thinking). Thinking
+  tokens cost money too, so we track them separately.
+
+### Tool schemas from type hints
+`@tool` reads the function's signature and builds a pydantic model from it. That one model gives the
+JSON Schema for the declaration *and* validates the model's arguments before the function runs.
+Models do send wrong arguments sometimes, and "invalid arguments" will be one of our failure
+categories.
+
+### Testing an agent without calling the model
+`tests/test_loop.py` uses a `ScriptedLLM` that returns pre-written replies. Because the loop only
+depends on the `LLMClient` interface, a fake can stand in for Gemini, so tests are free, instant and
+repeatable. This is the same idea replay is built on in Phase 3: serve a known response instead of
+calling the real model.
+
+## 2026-10-27 — Phase 0: first live runs on Flash-Lite
+
+### Parallel function calling
+Asked "Was I charged twice for order 4417?", Flash-Lite called `get_order` **and** `get_payments` in
+the same reply: one model turn containing two `function_call` parts. Our loop already handles this,
+because it runs every call in `tool_calls` and returns all the results together in one turn.
+Consequence for later phases: one LLM span can have several tool spans as siblings, so the trace is
+a real tree, not a list.
+
+### Watching the agent handle an error
+Asked about order 9999, the agent got `{"error": "LookupError: No order with ID 9999"}` and told the
+customer it couldn't find the order, instead of making one up. That is the behaviour D-013 is meant
+to make visible. The failing version of this (an agent that ignores the error) is what Phase 6's
+Blame has to catch.
+
+### Thinking tokens
+Both runs reported 0 thinking tokens on Flash-Lite. Thinking is either off or minimal by default for
+this model. Token and cost accounting (Phase 1) must still handle thinking tokens, because Flash
+and other settings do produce them.
