@@ -181,8 +181,28 @@ def create_app(store: Store, ui_dist: Path | None = UI_DIST) -> FastAPI:
     app = FastAPI(title="Agent Reliability Lab", version="0.0.1")
 
     @app.get("/api/runs", response_model=list[RunSummary])
-    def list_runs(limit: int = 100, status: str | None = None, agent: str | None = None):
-        return _summaries(store, store.runs(limit, status=status, agent_name=agent))
+    def list_runs(
+        limit: int = 100,
+        status: str | None = None,
+        agent: str | None = None,
+        task_id: str | None = None,
+    ):
+        runs = store.runs(limit, status=status, agent_name=agent, task_id=task_id)
+        return _summaries(store, runs)
+
+    @app.get("/api/diff")
+    def diff(a: str, b: str) -> dict[str, Any]:
+        """Two runs aligned step by step: rows, the first divergence and downstream effects."""
+        from agentlab.diff import diff_runs
+
+        try:
+            run_a, run_b = store.find_run(a), store.find_run(b)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        result = diff_runs(store, run_a.id, run_b.id).to_dict()
+        (result["a_run"],) = _summaries(store, [run_a])
+        (result["b_run"],) = _summaries(store, [run_b])
+        return result
 
     @app.get("/api/runs/{run_id}", response_model=RunDetail)
     def get_run(run_id: str):

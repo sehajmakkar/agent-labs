@@ -21,8 +21,8 @@ Sizes are relative (S / M / L), not calendar estimates.
 | 2 | Evals and the decision tree UI | ✅ Done |
 | 3 | Deterministic replay | ✅ Done |
 | 4 | Fork & Replay | ✅ Done |
-| 5 | Trajectory Diff | ⏭️ Next |
-| 6 | Auto-Blame | ⬜ Not started |
+| 5 | Trajectory Diff | ✅ Done |
+| 6 | Auto-Blame | ⏭️ Next |
 | 7 | Experiments, regressions and CI gate | ⬜ Not started |
 | 8 | Chaos testing *(stretch)* | ⬜ Not started |
 | 9 | Pitch kit | ⬜ Not started |
@@ -500,21 +500,58 @@ it was my change and not luck?
 - Comparing a fork's *paths* step by step, not just its pass rate. That's Phase 5's Trajectory
   Diff.
 
-### Phase 5 — Trajectory Diff · M · ⏭️ Next
+### Phase 5 — Trajectory Diff · M · ✅ Done
 
-- [ ] Step alignment: shared prefix, then sequence alignment on step type, tool name and argument
-similarity
-- [ ] Divergence point detection
-- [ ] Side-by-side diff view: matched, changed, added and removed steps
-- [ ] Downstream effect summary (tokens, cost, outcome)
-- [ ] **Demo:** original vs. fork, and Flash vs. Flash-Lite on the same task ("the cheaper model
-skips the verification step on refunds")
-- [ ] **Learnings** written up
+- [x] Runs as steps: one model decision plus its tool calls and results, for our loop and for agents with their own loop (`diff/steps.py`, D-044)
+- [x] Step alignment: shared prefix, then Needleman–Wunsch on step type, tool names, argument and result similarity (`diff/align.py`, D-045)
+- [x] Divergence point detection, explained in words (`get_order: order_id '4417' → '4471'`, "only in B: list_deploys(…)", "A calls get_order; B answers")
+- [x] Side-by-side diff view: matched, changed, added and removed steps; replayed steps marked; identical steps can be hidden (`DiffView`, `/api/diff`, `lab diff`)
+- [x] Downstream effect summary: outcome, steps, tokens, cost (labelled when a fork or replay paid only for live calls), time, and a word-level diff of the final answers (D-046)
+- [x] "Compare with" on every run (its source, or other runs of the same task, other models first); "⇄ diff" on every fork run
+- [x] **Demo:** original vs. fork, and Flash vs. Flash-Lite on the same task. The refund fork diff: steps 1–2 identical (↺ recorded), divergence at step 3, ✗ incomplete → ✓ passed, with "RF-1001" visible in the answer diff. Flash vs Flash-Lite on 8 tasks (Flash 8/8): Flash adds verification lookups (a `get_order` cross-check; deploy history and `list_alerts` before answering "should I roll back?", 7 steps vs 4, 5× the cost and time). It was the cheaper model that skipped the verification steps, and it usually still passed.
+- [x] **Learnings** written up
 - **Learn:** sequence alignment (LCS, Needleman–Wunsch), similarity measures, tree edit distance,
 designing a diff view.
 - **Pitch:** Braintrust, Raga AI, Arize: experiments become explainable, not just scored.
 
-### Phase 6 — Auto-Blame · L · *headline differentiator*
+#### How we built it
+
+**The question:** two runs of the same task ended differently. Where exactly did they part ways,
+and what did that cost?
+
+1. **The unit of comparison is the step** (D-044). `extract_steps` turns a run's spans into steps:
+   the model's decision (tool calls with arguments, or text), each tool's result or error, tokens,
+   cost, retries, and whether it was replayed. Step spans give the grouping for our loop; for
+   other agents each successful model call starts a step.
+2. **Similarity, with a score from 0 to 1** (D-045).
+   - Steps that call tools: multiset Jaccard of tool names (0.6), the share of equal arguments
+     (0.3) and the share of equal results (0.1).
+   - Answers: the share of words in common, in order (difflib).
+   - Steps of different kinds: 0.
+3. **Alignment.** First the shared prefix of identical steps. Then Needleman–Wunsch: a dynamic
+   programming table where each cell takes the best of pairing two steps (scored
+   2·similarity − 1) or leaving one unpaired (−0.6), and a traceback that yields rows marked
+   `same`, `changed`, `added` or `removed`. Each changed row gets notes in words.
+4. **Divergence and effects.** The first row that isn't `same` is the divergence. Each run's
+   outcome (from its eval result), steps, tokens, cost and time are compared, and the final answers
+   get a word-level diff (difflib opcodes over words, whitespace kept).
+5. **Three ways in:** `lab diff A B` (side by side in the terminal), `GET /api/diff`, and the UI
+   page `#/diff/A/B`, reached from "Compare with" on any run or "⇄ diff" on a fork run.
+6. **Verified:**
+   - 15 diff tests: identical runs; insertions, including long ones; deletions; changed arguments
+     with notes; kinds of step; a missing argument; similarity; word diff; stored runs; own-loop
+     agents; the API.
+   - Live diffs of the refund fork and of 8 Flash/Flash-Lite pairs.
+   - UI screenshots.
+
+**Not done yet, and worth saying in an interview:**
+- Parallel versus sequential versions of the same calls show as extra steps (C-019).
+- Answer similarity is word overlap, not meaning: two answers that agree, worded differently,
+  look 30% alike.
+- Diffs compare two runs. Comparing whole experiments (all of one model's runs against all of
+  another's) is Phase 7.
+
+### Phase 6 — Auto-Blame · L · *headline differentiator* · ⏭️ Next
 
 - [ ] Seeded failure catalog: known bugs planted on purpose, as ground truth (C-004)
 - [ ] LLM judge ranks candidate "first wrong steps", with reasons

@@ -131,6 +131,55 @@ export type FamilyNode = {
   forks: { fork: ForkInfo; runs: FamilyNode[] }[];
 };
 
+export type DiffStep = {
+  index: number;
+  span_id: string;
+  kind: "tools" | "answer" | "error";
+  label: string;
+  calls: { name: string; args: Record<string, unknown>; output: unknown; error: string | null }[];
+  text: string | null;
+  error: string | null;
+  tokens: number;
+  cost_usd: number | null;
+  attempts: number;
+  replayed: boolean;
+};
+
+export type DiffRow = {
+  status: "same" | "changed" | "added" | "removed";
+  a: DiffStep | null;
+  b: DiffStep | null;
+  similarity: number;
+  notes: string[];
+};
+
+export type DiffSide = {
+  run_id: string;
+  agent: string;
+  model: string | null;
+  mode: string;
+  status: string;
+  passed: boolean | null;
+  category: string | null;
+  steps: number;
+  tokens: number;
+  cost_usd: number | null;
+  duration_s: number | null;
+  answer: string | null;
+};
+
+export type DiffResult = {
+  a: DiffSide;
+  b: DiffSide;
+  a_run: RunSummary;
+  b_run: RunSummary;
+  rows: DiffRow[];
+  divergence: { row: number; a_step: number | null; b_step: number | null; summary: string } | null;
+  answer_diff: { op: "equal" | "insert" | "delete"; text: string }[];
+  answer_similarity: number;
+  effects: string[];
+};
+
 export type ForkRequest = {
   run_id: string;
   span_id: string;
@@ -180,10 +229,11 @@ async function get<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  runs: (params: { status?: string; agent?: string } = {}) => {
+  runs: (params: { status?: string; agent?: string; task_id?: string } = {}) => {
     const query = new URLSearchParams({ limit: "200" });
     if (params.status) query.set("status", params.status);
     if (params.agent) query.set("agent", params.agent);
+    if (params.task_id) query.set("task_id", params.task_id);
     return get<RunSummary[]>(`/api/runs?${query}`);
   },
   run: (id: string) => get<RunDetail>(`/api/runs/${id}`),
@@ -197,6 +247,8 @@ export const api = {
       body: JSON.stringify(request),
     }),
   models: () => get<Record<string, string>>("/api/models"),
+  diff: (a: string, b: string) =>
+    get<DiffResult>(`/api/diff?${new URLSearchParams({ a, b })}`),
   recordings: (spanId: string) => get<Recording[]>(`/api/spans/${spanId}/recordings`),
   evals: () => get<EvalRun[]>("/api/evals"),
   eval: (id: string) => get<EvalDetail>(`/api/evals/${id}`),

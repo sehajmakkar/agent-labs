@@ -182,3 +182,11 @@ Entries marked _anticipated_ were identified during planning and have not been h
   to start `lab worker` when a job is waiting.
 - **Still open:** job leases with a heartbeat, so a dead worker's job is re-queued.
 
+
+## C-019 — The same work, split into steps differently, shows as a bigger difference than it is _(open)_
+- **Problem:** Flash-Lite asked for `list_deploys`, `get_metrics` and `search_logs` in one step;
+  Flash called them one at a time over three steps. Aligning step by step shows three added steps
+  and one changed step, though both runs made the same calls.
+- **Idea:** a second view that compares the *set of calls made so far* at each point (or aligns
+  individual tool calls rather than steps), so parallel and sequential versions of the same work
+  line up. The step view stays the default, because steps are the unit you fork from.

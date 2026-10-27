@@ -1,4 +1,5 @@
 import { useRoute } from "./lib/hooks";
+import { DiffView } from "./pages/DiffView";
 import { EvalView, Evals } from "./pages/Evals";
 import { ForkView } from "./pages/ForkView";
 import { RunView } from "./pages/RunView";
@@ -28,6 +29,7 @@ export function App() {
         {route.page === "evals" && <Evals />}
         {route.page === "eval" && <EvalView id={route.id} />}
         {route.page === "fork" && <ForkView id={route.id} />}
+        {route.page === "diff" && <DiffView a={route.a} b={route.b} />}
       </main>
     </div>
   );

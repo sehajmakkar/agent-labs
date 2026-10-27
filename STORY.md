@@ -4,11 +4,11 @@ The whole project as one narrative: what we built, how it works, and why each pi
 before an interview or a demo. For the file-by-file reading order, see
 [WALKTHROUGH.md](WALKTHROUGH.md).
 
-Claude updates this file at the end of every phase. Last updated: **Phase 4 (2026-10-27)**.
+Claude updates this file at the end of every phase. Last updated: **Phase 5 (2026-10-27)**.
 
 **In one line:** we built a flight recorder for AI agents, a way to replay any recorded run
-exactly, and a way to fork a run at any step with one change and *prove* whether the change
-fixed it.
+exactly, a way to fork a run at any step with one change and *prove* whether the change fixed it,
+and a diff that shows exactly where two runs went different ways.
 
 ---
 
@@ -225,33 +225,96 @@ created.
 
 ---
 
-## What comes next, on top of fork
+## Chapter 5: Trajectory Diff, where two runs part ways (Phase 5)
 
-### Trajectory Diff (Phase 5)
+A fork's pass rate says *whether* a change helped. The diff says *how*: it lines two runs up step
+by step and points at the first place they differ.
 
-The fork page shows pass *rates*. Diff shows *how* paths differ: line up two runs step by step and
-point at the first divergence.
+**Step 1: turn each run into steps.** A step is one model decision plus what it caused:
 
 ```
-         ALR-999 control                    ALR-999 fork 3
-step 1   get_alert → "no alert"         =   get_alert → "no alert"
-step 2   list_alerts                    =   list_alerts
-step 3   get_metrics(checkout) …        ≠   answer: "ALR-999 doesn't exist. Firing: ALR-101…"
-                                        ▲ first divergence
+step 1   → get_order(4417), get_payments(4417)     ← {earbuds…}, {P-901, P-902 captured}
+step 2   → refund_payment(P-902)                   ← {RF-1001}
+step 3   "I've processed a refund…"
 ```
+
+**Step 2: line them up.** You can't just compare step 3 with step 3: if one run does an extra
+check, every later step shifts. This is the problem `diff` solves for lines of code and biologists
+solve for DNA. We use **Needleman–Wunsch**:
+- Fill a table where each cell is the best score for lining up the first *i* steps of A with the
+  first *j* of B.
+- Each cell picks the best of three moves: *pair* these two steps (scored by how similar they
+  are), or *skip* one of them (a gap, with a penalty).
+- Read the answer back from the corner.
+
+Because pairs are scored by *similarity* (same tools? same arguments? same results? same words?),
+"the same lookup for a different order" lines up as a **change**, and an extra check shows as an
+**added** step, with no shifting.
+
+**Step 3: say what changed, and what it caused.** Each changed row gets notes in words
+(`get_order: order_id '4417' → '4471'`), and the effects sit side by side: outcome, steps, tokens,
+cost, time, plus a word-level diff of the two final answers.
+
+**Seen live, original vs fork** (the refund fix from Chapter 4):
+
+```
+   A original                        B fork
+=  1. get_order, get_payments    │   1. ↺ get_order, get_payments
+=  2. refund_payment(P-902)      │   2. ↺ refund_payment(P-902)
+≠  3. "I've successfully issued… │   3. "…Your refund ID is RF-1001…"
+first divergence: step 3 · outcome ✗ incomplete → ✓ passed
+```
+
+**Seen live, Flash-Lite vs Flash** on the same eight tasks. Flash passed 8/8, and the diff shows
+what its extra cost buys:
+
+```
+   A Flash-Lite                          B Flash
+=  1. get_alert(ALR-103)             │   1. get_alert(ALR-103)
++                                    │   2. list_deploys(payments)
++                                    │   3. list_alerts()
++                                    │   4. get_metrics(payments)
+≠  2. list_deploys, get_metrics,     │   5. search_logs(payments)
+      search_logs (all at once)
+=  3. get_dependencies(payments)     │   6. get_dependencies(payments)
+≠  4. "Root cause: acmepay…"         │   7. "No, do not roll back…"
+steps 4 → 7 · tokens 3,713 → 8,998 · cost 5× · time 5× · both pass
+```
+
+So **Flash verifies more**: an extra `get_order` cross-check on order questions, and deploy
+history and `list_alerts` before answering "should I roll back?". Flash-Lite skips those checks,
+bundles its lookups into one step, and usually passes anyway. The one task where the extra care
+paid off was the refund: Flash gave the refund ID.
+
+**A limit we found:** when one model bundles three calls into one step and the other spreads them
+over three, the diff shows extra steps, though the same work was done. It's noted as an open
+challenge.
+
+---
+
+## What comes next, on top of fork and diff
 
 ### Auto-Blame (Phase 6)
 
-Fork lets *you* test a guess. Blame makes the guess, then proves it:
-1. A judge reads a failed run and proposes the first wrong step, plus a correction.
-2. Fork that step, N times with controls, as in Chapter 4.
-3. If the corrected fork passes and the control doesn't, the step is confirmed as the cause.
+Fork lets *you* test a guess about which step was wrong; diff shows how runs differ. Blame makes
+the guess itself, then proves it:
+1. A judge reads a failed run and ranks candidate "first wrong steps", each with a correction.
+2. Fork each candidate with its correction, N times with controls (Chapter 4).
+3. The step whose correction turns failures into passes is confirmed as the cause.
+4. The diff of the winning fork against the original shows exactly what changed.
 
-The three ALR-999 forks are what Blame will automate. It must also guard against the trap from
-fork 2: a "fix" that only fools the checks.
+```
+ALR-999 run (failed)
+├─ candidate: step 1 (get_alert call)    fork → 0/5   not the cause
+└─ candidate: step 2 (switched alerts)   fork → 5/5 vs control 0/5, p = 0.008   ✓ confirmed
+```
 
-**The pitch:** "Other tools let you rerun from a step. We tell you *which* step was wrong, and
-prove it by forking, with a control, so you know it isn't luck."
+The three manual ALR-999 forks from Chapter 4 are exactly what Blame will automate, including the
+trap from fork 2: a "fix" that only fools the checks. Blame will be measured on a catalogue of
+deliberately planted bugs, where the guilty step is known.
+
+**The pitch:** "Other tools let you rerun from a step. We tell you *which* step was wrong, prove
+it by forking against a control, and show you the exact diff."
 
 ---
 
@@ -264,7 +327,9 @@ Evals tab → eval report (success %, p50/p95, failure chart)
         ├─ tree: red path to the error
         └─ click a node → inspector: exact prompt sent, reply, tool args and result
               └─ ⑂ Fork from here → change prompt / model / tool output, N, control
-                    └─ fork page: 5/5 vs 0/5, p-value, verdict, every run
+                    └─ fork page: 5/5 vs 0/5, p-value, verdict, every run (⇄ diff vs source)
+        └─ Compare with (source, or other runs of the task) → ⇄ Diff
+              └─ diff page: first divergence, effects, steps side by side, answer diff
 Runs tab  → every run ("Show replays and forks" reveals them)
-CLI       → lab run · lab eval · lab replay · lab fidelity · lab fork · lab worker · lab ui
+CLI       → lab run · lab eval · lab replay · lab fidelity · lab fork · lab diff · lab worker · lab ui
 ```

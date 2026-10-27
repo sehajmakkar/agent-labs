@@ -150,3 +150,51 @@ def _seconds(value: float | None) -> str:
 
 def _maybe_money(usd: float | None) -> str:
     return _money(usd) if usd is not None else "–"
+
+
+DIFF_MARK = {"same": "=", "changed": "≠", "added": "+", "removed": "-"}
+COLUMN = 44
+
+
+def render_diff(diff: Any) -> str:
+    """Two runs side by side, one aligned step per line, then the divergence and its effects."""
+    a, b = diff.a, diff.b
+    lines = [
+        f"A {a.run_id[:8]} · {a.agent} · {a.model or ''} · {a.mode}",
+        f"B {b.run_id[:8]} · {b.agent} · {b.model or ''} · {b.mode}",
+        "",
+        f"    {'A':{COLUMN}}   B",
+    ]
+    for row in diff.rows:
+        left = _cell(row.a)
+        right = _cell(row.b)
+        lines.append(f"{DIFF_MARK[row.status]} {left:{COLUMN}} │ {right}")
+        if row.status == "changed":
+            for note in row.notes:
+                lines.append(f"    ↳ {_truncate(note)}")
+    lines.append("")
+    if diff.divergence is None:
+        lines.append("no divergence: the two runs made the same decisions")
+    else:
+        lines.append(f"first divergence: {_truncate(diff.divergence.summary)}")
+    for effect in diff.effects():
+        lines.append(f"  {effect}")
+    if a.answer != b.answer and diff.answer_diff:
+        marked = "".join(
+            p["text"]
+            if p["op"] == "equal"
+            else f"[-{p['text']}-]"
+            if p["op"] == "delete"
+            else f"{{+{p['text']}+}}"
+            for p in diff.answer_diff
+        )
+        lines += ["", "answer (A → B):", " ".join(marked.split())[:600]]
+    return "\n".join(lines)
+
+
+def _cell(step: Any) -> str:
+    if step is None:
+        return ""
+    text = f"{step.index}. {'↺ ' if step.replayed else ''}{step.label()}"
+    text = " ".join(text.split())
+    return text if len(text) <= COLUMN else text[: COLUMN - 1] + "…"

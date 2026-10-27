@@ -80,8 +80,8 @@ export function ForkView({ id }: { id: string }) {
       {summary && <p className="verdict">{summary.verdict}</p>}
 
       <div className="fork-groups">
-        <RunList title="With the change" runs={withChange} />
-        {fork.control && <RunList title="Without it (control)" runs={without} />}
+        <RunList title="With the change" runs={withChange} sourceId={source.id} />
+        {fork.control && <RunList title="Without it (control)" runs={without} sourceId={source.id} />}
       </div>
       <p className="muted">
         Queued {localTime(fork.created_at)}
@@ -121,7 +121,7 @@ function Rate({ label, group, good = false }: { label: string; group: ForkGroup;
   );
 }
 
-function RunList({ title, runs }: { title: string; runs: RunSummary[] }) {
+function RunList({ title, runs, sourceId }: { title: string; runs: RunSummary[]; sourceId: string }) {
   return (
     <section>
       <h2>{title}</h2>
@@ -135,6 +135,15 @@ function RunList({ title, runs }: { title: string; runs: RunSummary[] }) {
               </td>
               <td className="muted">{truncate(run.answer ?? run.error ?? "", 110)}</td>
               <td className="num">{money(run.cost_usd)}</td>
+              <td>
+                <a
+                  href={`#/diff/${sourceId}/${run.id}`}
+                  onClick={(e) => e.stopPropagation()}
+                  title="Diff this run against the source run"
+                >
+                  ⇄ diff
+                </a>
+              </td>
             </tr>
           ))}
         </tbody>

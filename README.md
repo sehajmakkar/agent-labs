@@ -130,6 +130,7 @@ uv run lab fork <run-id> --step 3 --append-prompt "Always give the refund ID." -
                               # rerun from step 3 with the change, 5× vs 5 controls, p-value
 uv run lab worker --entry app.py:my_agent [--server http://lab:8000]
                               # run fork jobs queued from the UI, with your agent's code
+uv run lab diff <run-a> <run-b>   # align two runs step by step: first divergence, effects
 
 (cd ui && npm install && npm run build)
 uv run lab ui                 # web UI at http://127.0.0.1:8000: runs, evals, decision trees
@@ -155,4 +156,4 @@ The demo datasets include deliberate traps: a prompt injection hidden in an orde
 
 ## Project Status
 
-Early-stage project, built in phases. Done so far: tool-calling agents on Gemini, tracing of every run into a local or remote trace store, evals with programmatic and LLM-judge checks, a web UI with an interactive decision tree, **deterministic replay** (offline, verified span by span against the original run), and **Fork & Replay** (rerun from any step with a changed prompt, model or tool result; N runs against a control; Fisher's exact test; fork jobs run by workers in your own repo). Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.
+Early-stage project, built in phases. Done so far: tool-calling agents on Gemini, tracing of every run into a local or remote trace store, evals with programmatic and LLM-judge checks, a web UI with an interactive decision tree, **deterministic replay** (offline, verified span by span against the original run), **Fork & Replay** (rerun from any step with a changed prompt, model or tool result; N runs against a control; Fisher's exact test; fork jobs run by workers in your own repo), and **Trajectory Diff** (two runs aligned step by step, with the first divergence and its effect on outcome, tokens, cost and time). Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.

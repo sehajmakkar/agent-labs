@@ -210,7 +210,12 @@ class Store:
             session.commit()
 
     def runs(
-        self, limit: int = 20, *, status: str | None = None, agent_name: str | None = None
+        self,
+        limit: int = 20,
+        *,
+        status: str | None = None,
+        agent_name: str | None = None,
+        task_id: str | None = None,
     ) -> list[RunRow]:
         with Session(self.engine) as session:
             query = select(RunRow)
@@ -218,6 +223,8 @@ class Store:
                 query = query.where(RunRow.status == status)
             if agent_name:
                 query = query.where(RunRow.agent_name == agent_name)
+            if task_id:
+                query = query.where(RunRow.task_id == task_id)
             query = query.order_by(RunRow.started_at.desc()).limit(limit)
             return list(session.exec(query))
 

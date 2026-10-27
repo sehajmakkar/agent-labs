@@ -7,7 +7,8 @@ export type Route =
   | { page: "run"; id: string; span?: string; fork?: boolean }
   | { page: "evals" }
   | { page: "eval"; id: string }
-  | { page: "fork"; id: string };
+  | { page: "fork"; id: string }
+  | { page: "diff"; a: string; b: string };
 
 function parse(hash: string): Route {
   const [path, query = ""] = hash.replace(/^#/, "").split("?");
@@ -19,6 +20,7 @@ function parse(hash: string): Route {
   }
   if (parts[0] === "evals" && parts[1]) return { page: "eval", id: parts[1] };
   if (parts[0] === "forks" && parts[1]) return { page: "fork", id: parts[1] };
+  if (parts[0] === "diff" && parts[1] && parts[2]) return { page: "diff", a: parts[1], b: parts[2] };
   if (parts[0] === "evals") return { page: "evals" };
   return { page: "runs" };
 }

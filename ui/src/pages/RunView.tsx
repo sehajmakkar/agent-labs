@@ -1,5 +1,6 @@
 import { api } from "../api";
 import { Inspector } from "../components/Inspector";
+import { ComparePanel } from "../components/ComparePanel";
 import { FamilyTree } from "../components/FamilyTree";
 import { ReplayPanel } from "../components/ReplayPanel";
 import { Outcome } from "../components/RunStatus";
@@ -46,6 +47,7 @@ export function RunView({
           <Stat label="Run" value={run.id.slice(0, 8)} mono />
         </div>
         <ReplayPanel run={run} replays={replays} />
+        <ComparePanel key={run.id} run={run} />
         <FamilyTree runId={run.id} currentId={run.id} />
         <div className="run-io">
           <div>

@@ -70,6 +70,8 @@ around it.
   - `fork/`: fork points, Fisher's exact test, the fork runner (N forks plus N controls, scored),
     and the worker loop.
   - `remote.py`: `RemoteStore`, the store over HTTP (`lab.init("http://…")`, `lab worker --server`).
+  - `diff/`: runs as steps, Needleman–Wunsch step alignment with a weighted similarity, and the diff
+    report (divergence, effects, answer word diff).
   - `determinism.py`: `lab.now()`, `lab.monotonic()`, `lab.random()`, which are replayable.
   - `semconv.py`: span attribute names (OTel GenAI v1.41.0 plus our `agentlab.*`).
   - `llm/`: neutral types, the Gemini adapter, `wrap_genai_client` (the model-call boundary) and
@@ -101,6 +103,7 @@ uv run lab replay <run-id> [--entry FILE.py:FUNCTION]   # offline replay + fidel
 uv run lab fidelity                       # replay recent demo runs, share that reproduce exactly
 uv run lab fork <run> --step N --append-prompt "…" -n 5   # fork with a control; needs API key
 uv run lab worker [--entry FILE.py:FN] [--server URL] [--once]   # run queued fork jobs
+uv run lab diff <run-a> <run-b>           # trajectory diff in the terminal (UI: #/diff/A/B)
 (cd ui && npm install && npm run build && npm test)   # UI build and layout tests
 uv run lab ui                             # API + UI on http://127.0.0.1:8000 (Vite dev: cd ui && npm run dev)
 ```
@@ -140,7 +143,11 @@ workers run them. `AGENTLAB_TOKEN` guards `/api/store/*` when set.
   write-tool simulators; a fork job queue with `lab worker` (local or over HTTP via
   `RemoteStore`); the UI's fork dialog, fork page and run family; the `grounded` eval check;
   STORY.md. 97 Python tests; verified live (refund fix 5/5 vs 0/5, p = 0.008).
-- Next: Phase 5 (Trajectory Diff). See the checklist in PLAN.md. Tier 1 outreach can start (the
+- **Phase 5 done** (2026-10-27): Trajectory Diff. Runs become steps, aligned with a shared prefix
+  plus Needleman–Wunsch on a weighted step similarity; the first divergence in words; downstream
+  effects and an answer word diff; `lab diff`, `/api/diff`, the diff page, and "Compare with". 111
+  Python tests; verified on the refund fork and on Flash vs Flash-Lite over 8 tasks.
+- Next: Phase 6 (Auto-Blame). See the checklist in PLAN.md. Tier 1 outreach can start (the
   author's step).
 - Stack accepted (D-003 to D-006, D-011):
   - Python 3.12 with uv, FastAPI, SQLite/SQLModel, React + React Flow.

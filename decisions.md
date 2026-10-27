@@ -795,3 +795,68 @@ entry's status line.
   the PLAN sections for engineering detail, and the story for retelling.
 - **Rationale:** The author asked for a way to explain the whole project to someone from start to
   finish.
+
+## D-044 — A diff compares steps: one model decision plus the tool calls it caused
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Options:**
+  - (a) Diff the raw span trees (tree edit distance).
+  - (b) Diff the model calls only.
+  - (c) Diff *steps*: each model decision with its tool calls, results and words.
+- **Decision:** (c). `extract_steps` builds them from stored spans: from step spans for our loop,
+  or, for an agent with its own loop, by starting a new step at each successful model call.
+  Retried attempts that failed are folded into their step (shown as "N attempts").
+- **Trade-offs:**
+  - Tree edit distance would also see structural differences inside a step, such as span nesting.
+    Steps flatten that away.
+  - A step's parallel tool calls are compared as a multiset, so a different order isn't a change.
+  - We accept both because a step is how people reason about an agent ("at step 3 it answered
+    instead of checking"), and it is the unit that forks start from (D-015).
+- **Rationale:** The diff should answer "what did the agent decide differently?", not "which span
+  moved".
+
+## D-045 — Alignment: shared prefix, then Needleman–Wunsch with a weighted step similarity
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Options:**
+  - LCS on exact step equality;
+  - Needleman–Wunsch (global alignment with a similarity score);
+  - embedding similarity of step texts.
+- **Decision:**
+  - Identical steps from the start are matched first.
+  - The rest are aligned with Needleman–Wunsch: a pair scores `2·similarity − 1`, and a gap
+    costs −0.6.
+  - Similarity:
+    - steps that call tools: 0.6 × multiset Jaccard of tool names, 0.3 × the share of arguments
+      that are equal, and 0.1 × the share of results that are equal;
+    - answers: the share of words in common (difflib);
+    - steps of different kinds: 0.
+  - Each changed pair gets notes in words (`get_order: order_id '4417' → '4471'`).
+- **Trade-offs:**
+  - The weights and gap penalty are hand-picked, not learned.
+  - Word overlap can't tell that two differently worded answers mean the same thing.
+  - With exact-match LCS, every slightly different step would show as removed plus added.
+  - We accept these: the alignment is explainable, has no dependencies, is tested on insertions,
+    deletions and substitutions, and is fast for runs of tens of steps. An embedding model could
+    replace `text_similarity` later.
+- **Rationale:** "Same tool, different arguments" must show as a change, and an extra step must
+  show as an insertion without shifting every later step.
+
+## D-046 — Diffs are computed on demand and show downstream effects, not just the steps
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - `GET /api/diff?a=&b=` and `lab diff A B` compute the diff from the store each time.
+  - Each run's outcome (its eval result if scored), steps, tokens, cost and time are shown side by
+    side, with a word-level diff of the final answers.
+  - The cost of a replay or fork is labelled as covering live calls only.
+  - Every run page has "Compare with": its source, or other runs of the same task. Fork pages
+    link each run to a diff against the source.
+- **Trade-offs:** Nothing is cached, so a diff of two 50-step runs is recomputed each time
+  (milliseconds at this size). Comparing a fork's cost with its source's is apples to oranges, so
+  we label it rather than hide it.
+- **Rationale:** "Where did it diverge?" is half the question; "and what did that change?" is the
+  other half.

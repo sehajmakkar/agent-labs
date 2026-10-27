@@ -525,3 +525,69 @@ forks and the worker don't know the difference: that's coding to an interface. T
 - The endpoint is an explicit whitelist of 11 methods, never "call any method by name".
 - A bearer token (`Authorization: Bearer …`) is the simplest authentication. Real deployments add
   TLS, per-worker tokens and batching, because one request per span is slow over the internet.
+
+## 2026-10-27 — Phase 5: Trajectory Diff
+
+### What to compare: steps, not spans
+A diff must answer "what did the agent decide differently?". The unit is a **step**: one model
+decision plus the tool calls it caused and their results. Our loop records steps directly; for an
+agent with its own loop, each successful model call starts a new step. Failed retries fold into
+their step, because they're infrastructure, not decisions.
+
+### Sequence alignment: LCS and Needleman–Wunsch
+Two runs rarely match step for step. One verifies something extra, or answers a step earlier, so
+comparing step 3 with step 3 is wrong as soon as anything is inserted. This is the classic
+alignment problem, from bioinformatics (DNA), `diff` (lines of a file) and spell checkers
+(letters):
+- **LCS (longest common subsequence):** the longest list of items that appear in both, in order.
+  It is what `diff` uses for lines, but items either match exactly or not at all.
+- **Needleman–Wunsch:** dynamic programming over a table where cell (i, j) is the best score for
+  aligning the first i steps of A with the first j of B. Each cell takes the best of three moves:
+  pair A[i] with B[j] (scored by how *similar* they are), or skip one of them (a gap, with a
+  penalty). Tracing back from the bottom-right corner gives the alignment. Because pairs are
+  scored by similarity, "same tool, different argument" lines up as a change rather than a
+  deletion plus an insertion.
+- **Gap penalty:** ours is −0.6, and a pair scores 2·similarity − 1. So two steps are paired once
+  they are more than 20% alike; below that, leaving both unpaired scores better.
+- **Shared prefix first:** identical leading steps are matched before the dynamic programming. A
+  fork's frozen prefix is always identical, so that saves work and makes the result obvious.
+
+### Similarity measures
+- **Multiset Jaccard** for tool names: |A ∩ B| / |A ∪ B|, counting repeats.
+  `{get_order, get_payments}` vs `{get_payments}` = 1/2.
+- **Share of equal arguments:** keys whose values match, divided by all keys on either side.
+- **Word-sequence ratio** for answers (difflib's `SequenceMatcher`): 2 × matching words / total
+  words. It is crude: two answers that say the same thing in different words score low. An
+  embedding model would fix that, at the cost of a model call.
+- **Weights** (0.6 tool names, 0.3 arguments, 0.1 results): what the agent chose to do matters
+  most, how it called the tool next, and what came back last.
+
+### Tree edit distance, and why we didn't use it
+Tree edit distance (for example Zhang–Shasha) counts the inserts, deletes and relabels needed to
+turn one tree into another. It is the general answer for comparing span trees, but it reports
+structural edits ("the span moved under a different parent"), not decisions. And a run's tree is
+shallow (run → step → calls), so aligning the sequence of steps captures nearly everything.
+
+### Designing a diff view
+- Put the **first divergence** at the top: that's the question people open a diff to answer.
+- Show **effects next to causes**: outcome, steps, tokens, cost and time for both runs.
+- Rows are **side by side**: `=` same (dimmed, and can be hidden), `≠` changed (with the reason in
+  words), `+` / `−` added or removed (hatched on the empty side).
+- Mark **replayed steps** (↺), so a fork's frozen prefix isn't mistaken for a coincidence.
+- Show a **word-level diff** of the final answers, the way code review shows a changed line.
+
+### Seen live: what Flash does that Flash-Lite doesn't
+Eight tasks on Flash (8/8 passed) diffed against Flash-Lite runs of the same tasks:
+- **Flash verifies more.** On the delivery-conflict and double-charge questions it adds a
+  `get_order` cross-check next to the shipment or payment lookup. On "should I roll back the
+  payments deploy?" it checks deploy history, metrics and `list_alerts` one at a time: 7 steps vs
+  Flash-Lite's 4, 2.4× the tokens, 5× the cost and 5× the time.
+- **Flash-Lite parallelises.** It asks for three lookups in one step where Flash takes three
+  steps.
+- **Both usually pass.** The extra verification bought one fix: on the refund task Flash's answer
+  included the refund ID.
+- That is the plan's "the cheaper model skips the verification step", seen for real, with a price
+  tag. The diff shows *where* the extra spend goes; the eval shows whether it was worth it.
+- The same exercise exposed a limitation: calls spread across several steps by one model and
+  bundled into one step by the other show as added steps plus a change, not as "the same work,
+  split up" (C-019).

@@ -10,6 +10,7 @@
 - `lab fidelity`: replay recent runs and report how many reproduce exactly
 - `lab fork RUN_ID --step N --prompt …`: rerun from a step with one change, N times, vs a control
 - `lab worker`: run fork jobs queued from the UI, with this repo's agent code
+- `lab diff RUN_A RUN_B`: line two runs up step by step and show where they diverge
 - `lab ui`: serve the web UI and its API
 - `lab models`: list the Gemini models your API key can use
 """
@@ -105,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     wk.add_argument("--once", action="store_true", help="run at most one job, then exit")
     wk.add_argument("--no-judge", action="store_true")
 
+    df = commands.add_parser("diff", help="compare two runs step by step")
+    df.add_argument("run_a", help="a run ID, or the start of one")
+    df.add_argument("run_b", help="a run ID, or the start of one")
+
     ui = commands.add_parser("ui", help="serve the web UI and its API")
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8000)
@@ -120,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
         return _runs(Store(settings.db_path), args.limit)
     if args.command == "show":
         return _show(Store(settings.db_path), args.run_id)
+    if args.command == "diff":
+        return _diff(Store(settings.db_path), args.run_a, args.run_b)
     if args.command == "evals":
         return _evals(Store(settings.db_path), args.limit)
     if args.command == "report":
@@ -291,6 +298,19 @@ def _show(store: Store, run_id: str) -> int:
         print(e, file=sys.stderr)
         return 1
     print(render_run(run, store.spans(run.id)))
+    return 0
+
+
+def _diff(store: Store, run_a: str, run_b: str) -> int:
+    from agentlab.diff import diff_runs
+    from agentlab.render import render_diff
+
+    try:
+        a, b = store.find_run(run_a), store.find_run(run_b)
+    except LookupError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(render_diff(diff_runs(store, a.id, b.id)))
     return 0
 
 
