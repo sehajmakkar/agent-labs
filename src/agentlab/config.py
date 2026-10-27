@@ -29,6 +29,9 @@ class Settings:
     flash_model: str
     flash_lite_model: str
     db_path: str
+    # Client-side cap on Gemini requests per minute; 0 turns it off. The default fits the free
+    # tier's 15 RPM for Flash-Lite (challenges.md C-012).
+    requests_per_minute: int = 15
 
     def model_for(self, tier: str) -> str:
         """Map a tier name ("flash" or "flash-lite") to its configured model ID."""
@@ -42,4 +45,5 @@ def load_settings() -> Settings:
         flash_model=os.environ.get("AGENTLAB_FLASH_MODEL", DEFAULT_FLASH_MODEL),
         flash_lite_model=os.environ.get("AGENTLAB_FLASH_LITE_MODEL", DEFAULT_FLASH_LITE_MODEL),
         db_path=os.environ.get("AGENTLAB_DB", DEFAULT_DB_PATH),
+        requests_per_minute=int(os.environ.get("AGENTLAB_RPM", "15")),
     )

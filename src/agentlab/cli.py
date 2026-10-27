@@ -3,6 +3,10 @@
 - `lab run AGENT MESSAGE`: run a demo agent, save the run, print its tree
 - `lab runs`: list recent runs
 - `lab show RUN_ID`: print a saved run's tree (an ID prefix is enough)
+- `lab eval DATASET...`: run every task in one or more datasets, score them, print a report
+- `lab evals`: list recent eval runs
+- `lab report EVAL_ID`: print an eval run's report again
+- `lab ui`: serve the web UI and its API
 - `lab models`: list the Gemini models your API key can use
 """
 
@@ -14,21 +18,18 @@ from google.genai import errors
 
 from agentlab import tracing
 from agentlab.config import Settings, load_settings
+from agentlab.demo import demo_agents
 from agentlab.llm.base import TransientLLMError
 from agentlab.llm.gemini import GeminiClient
 from agentlab.loop import Agent, run_agent
-from agentlab.render import render_run
-from agentlab.store import Store
+from agentlab.render import render_eval, render_run
+from agentlab.store import Store, run_message
 
-
-def _demo_agents() -> dict[str, Agent]:
-    from agents.support import AGENT as support
-
-    return {support.name: support}
+TIERS = ["flash", "flash-lite"]
 
 
 def main(argv: list[str] | None = None) -> int:
-    agents = _demo_agents()
+    agents = demo_agents()
     parser = argparse.ArgumentParser(prog="lab", description="Agent Reliability Lab")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -36,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("agent", choices=sorted(agents))
     run.add_argument("message")
     # Flash-Lite by default: Flash is sometimes unavailable (decisions.md D-014).
-    run.add_argument("--model", choices=["flash", "flash-lite"], default="flash-lite")
+    run.add_argument("--model", choices=TIERS, default="flash-lite")
     run.add_argument("--max-steps", type=int, default=10)
     run.add_argument("--timeout", type=float, default=120, help="seconds for the whole run")
 
@@ -46,15 +47,42 @@ def main(argv: list[str] | None = None) -> int:
     show = commands.add_parser("show", help="print the trace of a saved run")
     show.add_argument("run_id", help="a run ID, or the start of one")
 
+    ev = commands.add_parser("eval", help="run and score every task in one or more datasets")
+    ev.add_argument("datasets", nargs="+", help="JSONL dataset files")
+    ev.add_argument("--model", choices=TIERS, default="flash-lite")
+    ev.add_argument("--judge-model", choices=TIERS, default="flash-lite")
+    ev.add_argument("--no-judge", action="store_true", help="skip LLM-judge checks")
+    ev.add_argument("--tasks", help="only these task IDs, comma-separated")
+    ev.add_argument("--concurrency", type=int, default=4)
+    ev.add_argument("--max-steps", type=int, default=10)
+    ev.add_argument("--timeout", type=float, default=120, help="seconds per task")
+
+    evals = commands.add_parser("evals", help="list recent eval runs")
+    evals.add_argument("--limit", type=int, default=20)
+
+    report = commands.add_parser("report", help="print the report of a saved eval run")
+    report.add_argument("eval_id", help="an eval run ID, or the start of one")
+
+    ui = commands.add_parser("ui", help="serve the web UI and its API")
+    ui.add_argument("--host", default="127.0.0.1")
+    ui.add_argument("--port", type=int, default=8000)
+
     commands.add_parser("models", help="list the Gemini Flash models your API key can use")
 
     args = parser.parse_args(argv)
     settings = load_settings()
 
+    # Commands that only read the store don't need an API key.
     if args.command == "runs":
         return _runs(Store(settings.db_path), args.limit)
     if args.command == "show":
         return _show(Store(settings.db_path), args.run_id)
+    if args.command == "evals":
+        return _evals(Store(settings.db_path), args.limit)
+    if args.command == "report":
+        return _report(Store(settings.db_path), args.eval_id)
+    if args.command == "ui":
+        return _ui(Store(settings.db_path), args.host, args.port)
 
     if not settings.gemini_api_key:
         print(
@@ -62,9 +90,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    llm = GeminiClient(api_key=settings.gemini_api_key)
+    llm = GeminiClient(
+        api_key=settings.gemini_api_key, requests_per_minute=settings.requests_per_minute or None
+    )
     if args.command == "models":
         return _models(llm, settings)
+    if args.command == "eval":
+        return _eval(llm, settings, agents, args)
     return _run(llm, settings, agents[args.agent], args)
 
 
@@ -96,16 +128,61 @@ def _run(llm: GeminiClient, settings: Settings, agent: Agent, args: argparse.Nam
     return 0 if result.status == "completed" else 1
 
 
+def _eval(
+    llm: GeminiClient, settings: Settings, agents: dict[str, Agent], args: argparse.Namespace
+) -> int:
+    from agentlab.evals import LLMJudge, load_dataset, run_eval
+    from agentlab.evals.runner import TaskOutcome
+
+    try:
+        tasks = [t for path in args.datasets for t in load_dataset(path)]
+    except (OSError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 2
+    if args.tasks:
+        wanted = set(args.tasks.split(","))
+        tasks = [t for t in tasks if t.id in wanted]
+    if not tasks:
+        print("No tasks to run.", file=sys.stderr)
+        return 2
+
+    store = tracing.init(settings.db_path)
+    model = settings.model_for(args.model)
+    judge = None if args.no_judge else LLMJudge(llm, settings.model_for(args.judge_model))
+    print(f"evaluating {len(tasks)} tasks on {model}, judge {judge.model if judge else 'off'} …\n")
+
+    def progress(outcome: TaskOutcome) -> None:
+        mark = "✓" if outcome.passed else f"✗ {outcome.category}"
+        print(f"  {outcome.task.id:28} {mark}", flush=True)
+
+    eval_id = run_eval(
+        tasks,
+        agents=agents,
+        llm=llm,
+        model=model,
+        store=store,
+        judge=judge,
+        datasets=args.datasets,
+        concurrency=args.concurrency,
+        max_steps=args.max_steps,
+        timeout_s=args.timeout,
+        on_result=progress,
+    )
+    print()
+    return _report(store, eval_id)
+
+
 def _runs(store: Store, limit: int) -> int:
     rows = store.runs(limit)
     if not rows:
         print('No runs yet. Try: lab run support "Was I charged twice for order 4417?"')
         return 0
     for run in rows:
-        # SQLite drops the timezone; stored times are UTC, shown in local time.
-        started = run.started_at.replace(tzinfo=UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-        message = (run.input or {}).get("message", "")
-        print(f"{run.id[:8]}  {started}  {run.agent_name:10} {run.status:10} {message[:60]}")
+        message = run_message(run)
+        print(
+            f"{run.id[:8]}  {_local(run.started_at)}  {run.agent_name:10} {run.status:10} "
+            f"{message[:60]}"
+        )
     return 0
 
 
@@ -116,6 +193,44 @@ def _show(store: Store, run_id: str) -> int:
         print(e, file=sys.stderr)
         return 1
     print(render_run(run, store.spans(run.id)))
+    return 0
+
+
+def _evals(store: Store, limit: int) -> int:
+    rows = store.eval_runs(limit)
+    if not rows:
+        print("No eval runs yet. Try: lab eval datasets/support.jsonl datasets/triage.jsonl")
+        return 0
+    for row in rows:
+        m = row.metrics or {}
+        score = f"{m['passed']}/{m['tasks']}" if m else row.status
+        print(
+            f"{row.id[:8]}  {_local(row.started_at)}  {row.model:24} {score:8} "
+            f"{', '.join(row.datasets)}"
+        )
+    return 0
+
+
+def _report(store: Store, eval_id: str) -> int:
+    try:
+        eval_run = store.find_eval_run(eval_id)
+    except LookupError as e:
+        print(e, file=sys.stderr)
+        return 1
+    results = store.eval_results(eval_run.id)
+    run_ids = [r.run_id for r in results]
+    runs = {run_id: store.get_run(run_id) for run_id in run_ids}
+    print(render_eval(eval_run, results, runs, store.run_totals(run_ids)))
+    return 0
+
+
+def _ui(store: Store, host: str, port: int) -> int:
+    import uvicorn
+
+    from agentlab.server import create_app
+
+    print(f"Agent Reliability Lab UI on http://{host}:{port}")
+    uvicorn.run(create_app(store), host=host, port=port, log_level="warning")
     return 0
 
 
@@ -134,6 +249,11 @@ def _models(llm: GeminiClient, settings: Settings) -> int:
     for model_id in missing:
         print(f"\nConfigured model {model_id!r} is not available. Set it in .env.", file=sys.stderr)
     return 1 if missing else 0
+
+
+def _local(started_at) -> str:
+    # SQLite drops the timezone; stored times are UTC, shown in local time.
+    return started_at.replace(tzinfo=UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 if __name__ == "__main__":

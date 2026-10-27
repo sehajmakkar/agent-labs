@@ -24,3 +24,4 @@ TOOL_KIND = "agentlab.tool.kind"  # "read" | "write"
 STEP_INDEX = "agentlab.step.index"
 LLM_ATTEMPTS = "agentlab.llm.attempts"  # 1 means no retries were needed
 RUN_STATUS = "agentlab.run.status"
+RATE_LIMIT_WAIT_S = "agentlab.rate_limit.wait_s"  # time a run spent waiting for our rate limiter

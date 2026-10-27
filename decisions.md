@@ -407,3 +407,139 @@ entry's status line.
   file is checked at each phase end.
 - **Rationale:** Learning is the first goal (CLAUDE.md). Reading files in dependency order is the
   fastest way to understand code someone else wrote.
+
+## D-022 — Demo agents live in `agentlab.demo`
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude, flagged to the author at the end of Phase 1)
+- **Context:** The wheel shipped a top-level `agents` package, which clashes with the OpenAI
+  Agents SDK (C-011).
+- **Options:**
+  - (a) move the demo agents to `agentlab.demo`;
+  - (b) leave them out of the wheel and load them only from the repo;
+  - (c) rename the top-level package.
+- **Decision:** (a). `src/agentlab/demo/` holds `support.py` and `triage.py`, and
+  `demo_agents()` lists them.
+- **Trade-offs:** About 15 KB of demo code ships inside the SDK. We accept it because the CLI's
+  `lab run` and `lab eval` then work from an installed wheel, not only from the repo.
+- **Rationale:** It is the only option with no name clash that still works when installed.
+
+## D-023 — Eval datasets are JSONL with typed checks, scored from stored runs
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Options:** YAML files, Python files, or JSONL.
+- **Decision:**
+  - One JSON task per line: `id`, `agent`, `input`, `expected` (the outcome in words) and
+    `checks`.
+  - Checks are a pydantic *discriminated union* on `type`, so a typo in a dataset fails loudly
+    with the file and line.
+  - Checks read the run back from the trace store (`Trajectory.from_store`), never the agent's
+    in-memory result.
+- **Trade-offs:**
+  - JSONL is harder to read and edit by hand than YAML, and it has no comments.
+  - Scoring from the store costs a few queries per task.
+  - We accept both: JSONL is the de facto format for eval datasets, appends cleanly and needs no
+    new dependency. Scoring from the store means the same checks work on *any* recorded run,
+    including a customer's own agent (`examples/customer_app.py`).
+- **Rationale:** Datasets should be data, not code. Scoring from traces makes evals a property of
+  the trace store, not of our loop.
+
+## D-024 — The LLM judge: Flash-Lite, reasoning first, failures kept separate
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - The judge is a Gemini call with structured output (`response_json_schema` from a pydantic
+    `Verdict`). `reasoning` comes before `passed` in the schema, so the model explains before it
+    decides.
+  - The judge grades against the task's written `expected` outcome and treats the tool results in
+    the transcript as ground truth.
+  - It defaults to Flash-Lite (`--judge-model flash` is available).
+  - If the judge call itself fails, the check reports `eval_error`, not an agent failure.
+- **Trade-offs:**
+  - The judge is the same model family as the agent, so it may favour answers that sound like its
+    own (self-preference bias).
+  - Every task costs one more model call. In the first eval the judge cost about 35% of the agent.
+  - We accept both: Flash is sometimes unavailable (D-014), and the cost is fractions of a cent.
+    Programmatic checks sit alongside the judge on every task, so one biased verdict can't pass a
+    run on its own.
+- **Rationale:** Some outcomes can't be checked by code ("didn't promise a refund"). Structured
+  output turns the judge's reply into validated data instead of text to scrape.
+
+## D-025 — Failure categories: each check names one, with run status first
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - Each check type has a default failure category (for example `answer_excludes` →
+    `false_claim`), and a dataset can override it per check.
+  - A task's category is the highest-precedence one among its failed checks and its run status:
+    `crash` > `timeout` > `max_steps` > `wrong_tool` > … > `eval_error`.
+- **Trade-offs:** One category per task hides secondary failures. We accept it because every
+  check's result is still stored and shown, and one category per task is what makes the
+  "how tasks failed" chart readable.
+- **Rationale:** The person writing a check knows which failure it is meant to catch. If the agent
+  never answered, judging the answer adds nothing, so run status comes first.
+
+## D-026 — A client-side rate limiter, and latency that leaves out its waiting
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude), after the first full eval hit the free-tier quota (C-012)
+- **Decision:**
+  - `GeminiClient` takes `requests_per_minute`. It is a sliding-window limiter shared by all
+    threads, set by `AGENTLAB_RPM` (default 15, the free-tier limit; 0 turns it off).
+  - Retries wait at least as long as the server's `RetryInfo` hint asks.
+  - Time spent waiting on the limiter is stored on the run (`agentlab.rate_limit.wait_s`) and left
+    out of latency metrics.
+- **Trade-offs:**
+  - Paid keys are slowed to 15 requests per minute until `AGENTLAB_RPM` is raised.
+  - Reported latency is the agent's own time, not wall time.
+  - We accept both: a default that never fails on a free key is better for a demo, and throttling
+    is the eval harness's doing, not the agent's.
+- **Rationale:** Retrying after a 429 handles bursts, not sustained load. Waiting before sending
+  is cheaper than being refused.
+
+## D-027 — The Phase 2 server is a read-only API over the local store
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude). This moves HTTP trace ingestion, which Phase 1's "known gaps"
+  said would come in Phase 2, to Phase 4.
+- **Decision:**
+  - `src/agentlab/server.py` (FastAPI) reads the SQLite store and serves the built UI.
+  - The SDK keeps writing straight to SQLite. Sending traces over HTTP moves to Phase 4, next to
+    `lab worker`, since both are about the lab talking to the customer's machine.
+- **Trade-offs:** `lab ui` must run on the machine that holds `.agentlab/lab.db`. We accept it
+  because Phase 2's demo is local, and an ingestion API needs auth and batching design that
+  belongs with the worker.
+- **Rationale:** It keeps Phase 2 to its checklist (evals and the tree UI).
+
+## D-028 — UI: React Flow with our own tree layout, hash routes, no state library
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - React 19, TypeScript and Vite in `ui/`, with `@xyflow/react` (React Flow) for the tree.
+  - Node positions come from a 50-line tidy-tree layout (`ui/src/lib/layout.ts`), not dagre or
+    ELK.
+  - Routing is by URL hash.
+  - Data is fetched with a small `useLoad` hook, with no Redux or React Query.
+  - In development, Vite proxies `/api` to `lab ui`; for the demo, FastAPI serves `ui/dist`.
+- **Trade-offs:**
+  - Our layout only handles trees; Phase 5's diff view may need a real graph layout.
+  - Hash URLs look less clean.
+  - We accept both: a span tree *is* a tree, and the layout is short enough to read and test
+    (5 vitest tests). Hash routing needs no server-side routing at all.
+- **Rationale:** It uses the fewest moving parts that do the job, which helps the author follow
+  the code.
+
+## D-029 — A customer-style example agent
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude recommended it after the author asked how customers plug in)
+- **Decision:** `examples/customer_app.py` is an agent with its own loop over raw `google-genai`,
+  traced with `lab.init`, `lab.wrap`, `@lab.tool` and `@lab.agent`.
+- **Trade-offs:** It is one more file to keep working as the SDK changes, and it is not covered by
+  offline tests because it calls Gemini. We accept it because it is the clearest proof of the
+  integration model (D-009), and it was verified live.
+- **Rationale:** It makes "we plug into their agent" concrete in a demo.

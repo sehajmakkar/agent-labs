@@ -78,12 +78,46 @@ Entries marked _anticipated_ were identified during planning and have not been h
 - **Resolution:** Accepted at demo scale (decisions.md D-016). If it matters, store each turn once
   and have recordings point to the turns.
 
-## C-011 — The wheel ships a top-level `agents` package _(open)_
+## C-011 — The wheel ships a top-level `agents` package _(resolved)_
 - **Problem:** `pyproject.toml` packages both `src/agentlab` and the demo `agents/`, so
   installing our wheel also installs a top-level `agents` module. The OpenAI Agents SDK
   (`openai-agents` on PyPI) installs a package with the same name, so a customer using both
   would get one overwriting the other. Found by building the wheel and listing its contents.
 - **Also:** the name `agentlab` is already taken on PyPI, so publishing will need another name
   (`agent-reliability-lab` was free on 2026-10-27).
-- **Resolution:** not fixed yet. Options: move the demo agents to `agentlab.demo`, or keep them
-  out of the wheel and load them only from the repo. Decide before anything is published.
+- **Resolution:** the demo agents moved to `agentlab.demo` at the start of Phase 2 (D-022). The
+  PyPI name still needs choosing before anything is published.
+
+## C-012 — The free tier allows 15 requests a minute; an eval needs about 100 _(resolved)_
+- **Problem:** The first full eval (20 tasks, 4 at a time, plus a judge call each) failed 10 tasks
+  with `429 RESOURCE_EXHAUSTED: ... free_tier_requests, limit: 15`. Six attempts with backoff
+  weren't enough, because four workers kept refilling the quota as soon as it emptied.
+- **What went right:** the eval labelled them `crash` (the agent's model call failed) and
+  `eval_error` (the judge's call failed), not as agent mistakes. That is why those categories
+  exist.
+- **Resolution:**
+  - A client-side sliding-window rate limiter (`llm/ratelimit.py`, `AGENTLAB_RPM`, default 15).
+  - Retries now honour the server's `RetryInfo` delay.
+  - The author also added a new API key.
+  - Rerunning the 11 failed tasks gave 10 passes and one real agent failure (D-026).
+
+## C-013 — A check that demanded one particular path _(resolved)_
+- **Problem:** `support-two-orders` ("were both orders delivered?") required `get_order`. The
+  agent answered correctly using `get_shipment`, and the eval failed it as `wrong_tool`.
+- **Resolution:** The check now tests the answer (it mentions both orders) and leaves correctness
+  to the judge. Lesson: check *outcomes* and *forbidden* actions; only require a specific tool
+  when using it is the point of the task (see learnings.md, "Eval design").
+
+## C-014 — npm crashed resolving vitest 5's optional peer dependencies _(resolved)_
+- **Problem:** `npm install` with vitest 5.0.5 failed inside npm itself:
+  `Cannot read properties of null (reading 'edgesOut')`, in the peer-dependency resolver.
+- **Resolution:** Used vitest 4.1.12, which supports Vite 8, instead of hiding the problem with
+  `--legacy-peer-deps`. Try vitest 5 again after an npm upgrade.
+
+## C-015 — `@lab.agent` runs store their input differently from our loop _(resolved)_
+- **Problem:** Our loop records `{"message": ...}` and `{"answer": ...}`. `@lab.agent` records the
+  function's arguments (`{"question": ...}`) and its raw return value. The UI and `lab runs`
+  showed blank messages for the customer example.
+- **Resolution:** `store.run_message` and `store.run_answer` read both shapes: the first text
+  argument and the plain return value. A test covers it.
+

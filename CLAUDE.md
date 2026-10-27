@@ -59,12 +59,20 @@ around it.
   - `tracing.py`: spans, runs, context propagation, `@agent`, `init()`.
   - `store.py`: SQLite tables (runs, spans, recordings).
   - `semconv.py`: span attribute names (OTel GenAI v1.41.0 plus our `agentlab.*`).
-  - `llm/`: neutral types, plus the Gemini adapter and `wrap_genai_client` (model-call boundary).
-  - `retry.py`, `cost.py`, `render.py` (the terminal tree), `config.py` (model IDs and prices, the
+  - `llm/`: neutral types, the Gemini adapter, `wrap_genai_client` (the model-call boundary) and
+    `ratelimit.py`.
+  - `evals/`: datasets and checks (`tasks.py`), the LLM judge, failure categories, metrics, and
+    the batch runner.
+  - `demo/`: demo agents that play the customer's role (`support.py`, `triage.py`).
+  - `server.py`: the read-only FastAPI app behind the UI.
+  - `retry.py`, `cost.py`, `render.py` (terminal output), `config.py` (model IDs and prices, the
     only place they live), `cli.py`.
-- `agents/`: demo agents that play the customer's role (`support.py`).
-- `tests/`: pytest. Tests never call the network: use a scripted fake LLM, or a fake `genai`
-  client wrapped with `wrap_genai_client`. The `store` fixture gives a fresh trace store.
+- `datasets/`: eval tasks as JSONL (20 tasks).
+- `ui/`: React + TypeScript + Vite + React Flow. `npm run build` → `ui/dist`, served by `lab ui`.
+- `examples/customer_app.py`: an agent with its own loop, traced with the SDK alone.
+- `tests/`: pytest. Tests never call the network: use a scripted fake LLM (`tests/fakes.py`), or
+  a fake `genai` client wrapped with `wrap_genai_client`. The `store` fixture gives a fresh trace
+  store. A fake LLM produces no `llm` spans, because those come from the wrapped Gemini client.
 
 ```
 uv sync                                   # install
@@ -74,7 +82,13 @@ uv run lab models                         # check Gemini model IDs (needs GEMINI
 uv run lab run support "Was I charged twice for order 4417?"   # Flash-Lite by default; prints the tree
 uv run lab runs                           # recent runs
 uv run lab show <run-id-prefix>           # a saved run's tree
+uv run lab eval datasets/support.jsonl datasets/triage.jsonl   # score 20 tasks (needs API key)
+uv run lab evals / lab report <id>        # past eval runs
+(cd ui && npm install && npm run build && npm test)   # UI build and layout tests
+uv run lab ui                             # API + UI on http://127.0.0.1:8000 (Vite dev: cd ui && npm run dev)
 ```
+
+`AGENTLAB_RPM` (default 15, the free-tier limit) caps Gemini requests per minute (D-026).
 
 Runs are saved to `.agentlab/lab.db` (git-ignored). There are no migrations (D-020): after a schema
 change, delete that file.
@@ -87,7 +101,11 @@ change, delete that file.
   `execute_tool`, saved to SQLite with recordings of every model and tool call; cost, tokens,
   latency, retries and timeouts; `lab run` / `runs` / `show`. 30 offline tests; verified live on
   Flash-Lite.
-- Next: Phase 2 (evals and the decision tree UI). See the checklist in PLAN.md.
+- **Phase 2 done** (2026-10-27): JSONL datasets with programmatic and LLM-judge checks, failure
+  categories, a concurrent batch runner, metrics, the triage agent, a rate limiter, a FastAPI API,
+  and the React UI (run list, eval report, decision tree, inspector). 64 Python tests and 5 UI
+  tests; verified live.
+- Next: Phase 3 (deterministic replay). See the checklist in PLAN.md.
 - Stack accepted (D-003 to D-006, D-011):
   - Python 3.12 with uv, FastAPI, SQLite/SQLModel, React + React Flow.
   - Our own agent loop with interception at the LLM client and tool functions. No LangGraph in the

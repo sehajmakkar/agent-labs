@@ -67,10 +67,25 @@ class LLMResponse:
 
 
 class TransientLLMError(Exception):
-    """A model call failed for a reason that may pass on retry: overload, rate limit, timeout."""
+    """A model call failed for a reason that may pass on retry: overload, rate limit, timeout.
+
+    `retry_after_s` is the server's own hint for how long to wait, when it gave one."""
+
+    def __init__(self, message: str, retry_after_s: float | None = None):
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
 
 
 class LLMClient(Protocol):
     def generate(
-        self, *, model: str, system: str, messages: list[Message], tools: list[Tool]
-    ) -> LLMResponse: ...
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[Message],
+        tools: list[Tool],
+        response_schema: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        """One model call. With `response_schema` (a JSON Schema), the reply text is JSON that
+        matches it ("structured output")."""
+        ...

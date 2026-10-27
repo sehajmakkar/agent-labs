@@ -18,8 +18,8 @@ Sizes are relative (S / M / L), not calendar estimates.
 |---|---|---|
 | 0 | Setup and a first agent | ✅ Done |
 | 1 | Tracing SDK and trace store | ✅ Done |
-| 2 | Evals and the decision tree UI | ⏭️ Next |
-| 3 | Deterministic replay | ⬜ Not started |
+| 2 | Evals and the decision tree UI | ✅ Done |
+| 3 | Deterministic replay | ⏭️ Next |
 | 4 | Fork & Replay | ⬜ Not started |
 | 5 | Trajectory Diff | ⬜ Not started |
 | 6 | Auto-Blame | ⬜ Not started |
@@ -222,32 +222,112 @@ how the customer writes their agent?
 
 **Not done yet, and worth saying in an interview:**
 - Traces go to a SQLite file on the customer's machine. Sending them to a lab server over HTTP
-  comes with the FastAPI server in Phase 2.
+  moves to Phase 4, next to `lab worker` (D-027).
 - The package isn't on PyPI, and the name `agentlab` is already taken there.
 - The wheel also ships the demo `agents/` package, which clashes with the OpenAI Agents SDK
-  (C-011).
+  (C-011). *Fixed at the start of Phase 2 (D-022).*
 
-### Phase 2 — Evals and the decision tree UI · M–L · *parity milestone* · ⏭️ Next
+### Phase 2 — Evals and the decision tree UI · M–L · *parity milestone* · ✅ Done
 
-- [ ] Task dataset format (input, expected outcome, checker)
-- [ ] Programmatic checkers
-- [ ] LLM-as-judge checker with structured output
-- [ ] Failure categories (wrong tool, invalid arguments, timeout, incomplete, false claim, …)
-- [ ] Batch runner over a dataset
-- [ ] Metrics: success rate, p50/p95 latency, cost per task
-- [ ] Incident triage demo agent
-- [ ] FastAPI server (`api/`)
-- [ ] UI: run list
-- [ ] UI: **interactive decision tree** (React Flow)
-- [ ] UI: node inspector (prompt, response, tool input and output)
-- [ ] **Demo:** run 20 tasks, open a failed one, click through its tree to the bad tool call
-- [ ] **Learnings** written up
+- [x] Demo agents moved into `agentlab.demo`, so the wheel no longer clashes with other packages (C-011, D-022)
+- [x] Task dataset format: JSONL with input, expected outcome and checks (`evals/tasks.py`, D-023)
+- [x] Programmatic checkers: `tool_called`, `tool_not_called`, `answer_contains`, `answer_excludes`, `max_steps`
+- [x] LLM-as-judge checker with structured output (`evals/judge.py`, D-024)
+- [x] Failure categories (crash, timeout, max_steps, wrong_tool, invalid_arguments, ignored_tool_error, false_claim, incomplete, inefficient, eval_error; D-025)
+- [x] Batch runner over a dataset, tasks in parallel (`evals/runner.py`, `lab eval`)
+- [x] Metrics: success rate, p50/p95 latency, cost per task, failures by category (`evals/metrics.py`)
+- [x] Incident triage demo agent (`demo/triage.py`); support agent grown to six orders, three tools and four traps
+- [x] 20-task dataset: `datasets/support.jsonl` (12) and `datasets/triage.jsonl` (8)
+- [x] Client-side rate limiter and server retry hints, after the free tier's 15 RPM broke the first eval (C-012, D-026)
+- [x] FastAPI server, read-only over the store (`src/agentlab/server.py`, `lab ui`; D-027)
+- [x] UI: run list (filters: agent, failures only)
+- [x] UI: **interactive decision tree** (React Flow, own tree layout, red path to errors; D-028)
+- [x] UI: node inspector: exact prompt (system instruction, tools offered, conversation), reply, tool input and output, raw recording
+- [x] UI: eval report (metric cards, failure-category chart, tasks with the reason each one failed)
+- [x] `examples/customer_app.py`: an agent with its own loop, traced with three SDK lines (D-029)
+- [x] **Demo:** run 20 tasks, open a failed one, click through its tree to the bad tool call. Live on Flash-Lite: **19/20 (95%)**, p50 2.76s, p95 5.84s, $0.001 per task. The failure is `triage-unknown-alert`: `get_alert` → "No alert ALR-999", and the agent silently investigated ALR-101 instead (`ignored_tool_error`).
+- [x] **Learnings** written up
+- Moved: HTTP trace ingestion → Phase 4, next to `lab worker` (D-027).
 - **Learn:** eval design, programmatic vs. LLM-judge scoring, judge bias, percentiles, frontend tree
 layout.
 - **Pitch:** "I can build your core product." Parity with Laminar, Raga AI, Langfuse and Maxim's
 tracing view. **Not enough to pitch on its own.**
 
-### Phase 3 — Deterministic replay · M
+#### How we built it
+
+**The question:** given recorded runs, how do we say *how well* an agent works and *how* it fails,
+and let someone see a failure instead of reading logs?
+
+1. **Evals score traces, not the agent's return value.**
+   - `Trajectory.from_store` flattens a stored run into what checks need: the question, every tool
+     call with its arguments and result, the answer, the step count and the status.
+   - So the same checks work on any recorded run, including `examples/customer_app.py`, which
+     never touches our loop (D-023).
+2. **A typed dataset format.**
+   - Tasks are JSONL.
+   - Checks are a pydantic **discriminated union**: the `type` field picks the class, so
+     `{"type": "tool_called", ...}` becomes a `ToolCalled` object, and a typo fails with the file
+     and line.
+   - Each check class has an `evaluate()` method (the strategy pattern) and a default failure
+     category.
+3. **An LLM judge with structured output** (D-024).
+   - A pydantic `Verdict` becomes a JSON Schema, and Gemini's `response_json_schema` makes the
+     reply match it. The reply is validated, not parsed with regexes.
+   - `reasoning` comes first, so the model argues before it decides.
+   - If the judge call itself fails, the check reports `eval_error`, never an agent failure.
+4. **Categories and metrics.**
+   - Each task gets one failure category: run status first, then the highest-precedence failed
+     check (D-025).
+   - Metrics: success rate, p50/p95 latency (percentiles with linear interpolation), cost per task
+     (summed from `llm` spans in one SQL `GROUP BY`), and judge cost kept separate.
+5. **A concurrent batch runner.**
+   - A `ThreadPoolExecutor` runs tasks in parallel. Each thread has its own `contextvars` context,
+     so traces don't mix.
+   - Run IDs are chosen up front (`run_agent(run_id=...)`), so a run that crashes is still scored
+     and linked.
+   - SQLite got WAL mode and cross-thread connections.
+6. **The first live eval failed, and that changed the design** (C-012).
+   - 10 of 20 tasks hit the free tier's 15 requests per minute.
+   - Fix: a **sliding-window rate limiter** shared by all threads, retries that honour the
+     server's `RetryInfo` delay, and rate-limit waiting recorded on the run and left out of
+     latency (D-026).
+   - The eval itself labelled those failures `crash` / `eval_error` rather than blaming the agent,
+     which validated the category design.
+7. **Fixing the eval as well as the agent.** One failure was the dataset's fault: a check required
+   `get_order` when `get_shipment` was an equally valid way to answer (C-013). We loosened the
+   check and wrote the lesson down: test outcomes, not paths.
+8. **A thin API.**
+   - FastAPI endpoints return pydantic response models, so they are validated and documented at
+     `/docs` for free.
+   - Run summaries use two aggregate queries in total, not one per run (avoiding N+1).
+   - `TestClient` tests the API in-process.
+9. **The UI.**
+   - React and TypeScript on Vite. A typed API client mirrors the response models.
+   - The tree: a 50-line tidy-tree layout (depth → column, leaf → row, parent centred on its
+     children), drawn by React Flow with a custom node per span. Ancestors of a failed span are
+     drawn red.
+   - Clicking a node opens the inspector, which rebuilds the exact prompt from the recording.
+   - Hash URLs carry the selected span, so a link can point at the failing call.
+   - Vite proxies `/api` in development, and FastAPI serves the built files for the demo.
+10. **Verified:**
+    - 64 Python tests (checks, judge, categories, percentiles, runner, rate limiter, API) and 5
+      layout tests;
+    - `tsc` type check and production build;
+    - live evals on Flash-Lite;
+    - headless-Chrome screenshots of the eval report, the failed run's tree and the inspector;
+    - the customer example run live.
+
+**Not done yet, and worth saying in an interview:**
+- The judge is the same model as the agent, so it is open to self-preference bias. We haven't
+  measured how often the judge agrees with a human.
+- Each task runs once. Pass rates over N repeats arrive with Fork (Phase 4) and Experiments
+  (Phase 7).
+- `lab ui` serves the UI from the repo's `ui/dist`; a pip-installed wheel doesn't include it yet.
+- The trace store is still local (D-027).
+- In the tree, step and agent nodes show wall time, including rate-limit waiting. The header and
+  the eval metrics leave that wait out. Waits are recorded per run, not per step.
+
+### Phase 3 — Deterministic replay · M · ⏭️ Next
 
 - [ ] Interceptor *replay* mode
 - [ ] Request hashing to match each call to its recording
@@ -271,6 +351,7 @@ effects.
 - [ ] Each fork runs **N times** and reports a pass rate (C-001)
 - [ ] UI: the run family shown as a tree
 - [ ] `lab worker`: runs fork jobs inside the user's repo (D-009)
+- [ ] HTTP trace ingestion: the SDK can send runs to a lab server instead of local SQLite (D-027)
 - [ ] **Demo:** a failed support run, forked at the bad step with a fix, now passes 5/5
 - [ ] **Learnings** written up
 - [ ] **Start Tier 1 outreach**

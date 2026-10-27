@@ -15,15 +15,22 @@ from pydantic import BaseModel
 from agentlab import semconv
 from agentlab.cost import cost_usd
 from agentlab.llm.base import LLMResponse, Message, ToolCall, TransientLLMError, Usage
+from agentlab.llm.ratelimit import RateLimiter
 from agentlab.tools import Tool
-from agentlab.tracing import span
+from agentlab.tracing import note_wait, span
 
 # HTTP statuses worth retrying: timeout, rate limit, and server-side failures or overload.
 TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 class GeminiClient:
-    def __init__(self, api_key: str | None = None, client: Any = None, timeout_s: float = 60):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        client: Any = None,
+        timeout_s: float = 60,
+        requests_per_minute: int | None = None,
+    ):
         if client is None:
             http_options = types.HttpOptions(
                 timeout=int(timeout_s * 1000),
@@ -32,9 +39,16 @@ class GeminiClient:
             )
             client = wrap_genai_client(genai.Client(api_key=api_key, http_options=http_options))
         self._client = client
+        self._limiter = RateLimiter(requests_per_minute) if requests_per_minute else None
 
     def generate(
-        self, *, model: str, system: str, messages: list[Message], tools: list[Tool]
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[Message],
+        tools: list[Tool],
+        response_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         config = types.GenerateContentConfig(
             system_instruction=system,
@@ -44,14 +58,20 @@ class GeminiClient:
             # The SDK can run Python functions for us; we turn that off so that every tool call
             # goes through our own loop, where it can be traced and later replayed.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            # Structured output: the model's reply is constrained to JSON matching this schema.
+            response_mime_type="application/json" if response_schema else None,
+            response_json_schema=response_schema,
         )
+        if self._limiter:
+            note_wait(self._limiter.acquire())
         try:
             response = self._client.models.generate_content(
                 model=model, contents=to_contents(messages), config=config
             )
         except errors.APIError as e:
             if e.code in TRANSIENT_STATUS_CODES:
-                raise TransientLLMError(f"Gemini API error {e.code}: {e.message}") from e
+                message = f"Gemini API error {e.code}: {e.message}"
+                raise TransientLLMError(message, retry_after_s=_retry_delay(e)) from e
             raise
         except httpx.TransportError as e:  # timeouts and dropped connections
             raise TransientLLMError(f"{type(e).__name__}: {e}") from e
@@ -59,6 +79,18 @@ class GeminiClient:
 
     def list_models(self) -> list[types.Model]:
         return list(self._client.models.list())
+
+
+def _retry_delay(e: errors.APIError) -> float | None:
+    """The wait the server asked for, from a google.rpc.RetryInfo detail such as "3s"."""
+    error = e.details.get("error", {}) if isinstance(e.details, dict) else {}
+    for detail in error.get("details") or []:
+        if str(detail.get("@type", "")).endswith("RetryInfo"):
+            try:
+                return float(str(detail.get("retryDelay", "")).removesuffix("s"))
+            except ValueError:
+                return None
+    return None
 
 
 def _declaration(tool: Tool) -> types.FunctionDeclaration:

@@ -64,14 +64,19 @@ def run_agent(
     timeout_s: float | None = None,
     retry: RetryPolicy = DEFAULT_RETRY,
     clock: Callable[[], float] = time.monotonic,
+    task_id: str | None = None,
+    run_id: str | None = None,
 ) -> AgentResult:
     """Run the agent on one message.
 
     Stops when the model answers without calling a tool ("completed"), after `max_steps` model
     calls ("max_steps"), or when `timeout_s` has passed before a new step starts ("timeout").
     Model errors that survive the retries propagate, and the run is recorded as "error".
+    `task_id` links the run to an eval task; `run_id` chooses its ID up front.
     """
-    with agent_run(agent.name, input={"message": user_message}, model=model) as agent_span:
+    with agent_run(
+        agent.name, input={"message": user_message}, model=model, task_id=task_id, run_id=run_id
+    ) as agent_span:
         result = _loop(agent, llm, model, user_message, max_steps, timeout_s, retry, clock)
         result.run_id = agent_span.run_id
         agent_span.output = {"answer": result.answer}

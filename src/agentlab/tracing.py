@@ -36,6 +36,7 @@ class _ActiveRun:
     id: str
     store: Store
     seq: Iterator[int] = field(default_factory=itertools.count)
+    wait_s: float = 0.0
 
 
 @dataclass
@@ -131,12 +132,18 @@ def span(
 
 @contextmanager
 def agent_run(
-    agent_name: str, input: Any = None, *, model: str | None = None, task_id: str | None = None
+    agent_name: str,
+    input: Any = None,
+    *,
+    model: str | None = None,
+    task_id: str | None = None,
+    run_id: str | None = None,
 ) -> Iterator[Span]:
     """Open an `invoke_agent` span, starting a new run first if none is active.
 
     Set `attributes[semconv.RUN_STATUS]` on the yielded span to record how the run ended
-    (default "completed"). An exception marks the run "error".
+    (default "completed"). An exception marks the run "error". Pass `run_id` to choose the run's ID
+    up front, so the caller knows it even if the run fails.
     """
     name = f"invoke_agent {agent_name}"
     attributes = {semconv.OPERATION_NAME: "invoke_agent", semconv.AGENT_NAME: agent_name}
@@ -149,13 +156,18 @@ def agent_run(
 
     store = _store
     run_id = store.create_run(
-        agent_name=agent_name, input=jsonable(input), model=model, task_id=task_id
+        agent_name=agent_name, input=jsonable(input), model=model, task_id=task_id, run_id=run_id
     )
-    token = _current_run.set(_ActiveRun(run_id, store))
+    active = _ActiveRun(run_id, store)
+    token = _current_run.set(active)
     status, output, error = "error", None, None
     try:
         with span("agent", name, input=input, attributes=attributes) as current:
-            yield current
+            try:
+                yield current
+            finally:
+                if active.wait_s:
+                    current.attributes[semconv.RATE_LIMIT_WAIT_S] = round(active.wait_s, 3)
         status = current.attributes.get(semconv.RUN_STATUS, "completed")
         output = jsonable(current.output)
     except BaseException as e:
@@ -183,6 +195,13 @@ def agent(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         return wrapper
 
     return decorate
+
+
+def note_wait(seconds: float) -> None:
+    """Add time spent waiting for a rate limiter to the current run, so metrics can leave it out."""
+    run = _current_run.get()
+    if run and seconds:
+        run.wait_s += seconds
 
 
 def current_run_id() -> str | None:

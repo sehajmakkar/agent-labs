@@ -24,14 +24,16 @@ def call_with_retries[T](fn: Callable[[], T], policy: RetryPolicy) -> tuple[T, i
     """Call `fn`, retrying on TransientLLMError. Returns the result and the number of attempts.
 
     Waits grow exponentially (1s, 2s, 4s, …) with random jitter, so many clients retrying at once
-    don't all hit the API at the same moment.
+    don't all hit the API at the same moment. A server's retry hint is a lower bound on the wait.
     """
     for attempt in range(1, policy.max_attempts + 1):
         try:
             return fn(), attempt
-        except TransientLLMError:
+        except TransientLLMError as e:
             if attempt == policy.max_attempts:
                 raise
             delay = min(policy.max_delay_s, policy.base_delay_s * 2 ** (attempt - 1))
-            policy.sleep(delay * random.uniform(0.5, 1.0))
+            delay *= random.uniform(0.5, 1.0)
+            # If the server said how long to wait ("retry in 3.6s"), wait at least that long.
+            policy.sleep(max(delay, e.retry_after_s or 0))
     raise AssertionError("unreachable")

@@ -53,9 +53,9 @@ The lab never hosts your agent. Your agent keeps running in your own code. The l
    def support_agent(message: str): ...
    ```
 
-   Recording works today. Replay, fork and the `read`/`write` guarantees arrive in later phases.
+   Recording works today. Replay, fork and the `read`/`write` guarantees arrive in later phases. [`examples/customer_app.py`](examples/customer_app.py) is a complete agent with its own loop, traced with just these lines.
 
-2. **Run it where you already do.** Local development, a CI eval suite (`lab eval tasks.yaml`), or production with sampling. Every run becomes a replayable trace.
+2. **Run it where you already do.** Local development, a CI eval suite (`lab eval tasks.jsonl`), or production with sampling. Every run becomes a replayable trace.
 3. **Debug in the UI.** Open a failed run, then **Blame** → **Fork** from the blamed step with a fix → **Diff** the branches. Forks are run by `lab worker`, a process inside your repo, so they use your real agent code.
 4. **Lock it in.** Save the verified failure as a regression test; CI blocks future changes that bring it back.
 
@@ -111,18 +111,41 @@ Agents already traced with OpenTelemetry (for example from LangGraph) can be imp
 
 ## Quickstart
 
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/) and a Gemini API key.
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Node 20+ (for the UI) and a Gemini API key.
 
 ```bash
 uv sync
 cp .env.example .env          # then add GEMINI_API_KEY
 uv run lab models             # check which Gemini Flash models your key can use
-uv run lab run support "Was I charged twice for order 4417?"   # prints the run's trace tree
-uv run lab runs               # recent runs
-uv run lab show <run-id>      # any saved run's tree (an ID prefix is enough)
+
+uv run lab run support "Was I charged twice for order 4417?"   # one run, printed as a tree
+uv run lab run triage "ALR-101 is firing. What's going on?"     # the incident-triage agent
+
+uv run lab eval datasets/support.jsonl datasets/triage.jsonl   # 20 tasks, scored, with a report
+uv run lab evals              # past eval runs; `lab report <id>` prints one again
+
+(cd ui && npm install && npm run build)
+uv run lab ui                 # web UI at http://127.0.0.1:8000: runs, evals, decision trees
+
 uv run pytest                 # offline tests, no API key needed
 ```
 
+### Evals
+
+A dataset is a JSONL file, one task per line: an input, the expected outcome in words, and checks.
+
+```json
+{"id": "support-double-charge", "agent": "support", "input": "Was I charged twice for order 4417?",
+ "expected": "Confirms two captured payments and says billing will refund one; no refund claimed.",
+ "checks": [{"type": "tool_called", "tool": "get_payments", "args": {"order_id": "4417"}},
+            {"type": "answer_excludes", "any_of": ["has been refunded"]},
+            {"type": "judge"}]}
+```
+
+Checks are programmatic (`tool_called`, `tool_not_called`, `answer_contains`, `answer_excludes`, `max_steps`) or an LLM judge with structured output. Every failed task gets a **failure category** (`wrong_tool`, `invalid_arguments`, `ignored_tool_error`, `false_claim`, `incomplete`, `timeout`, …), and each eval run reports success rate, p50/p95 latency and cost per task.
+
+The demo datasets include deliberate traps: a prompt injection hidden in an order's item name, a voided authorization hold that looks like a double charge, and incidents whose obvious suspect (a recent deploy) is not the cause.
+
 ## Project Status
 
-Early-stage project, built in phases. Done so far: a tool-calling agent on Gemini, and tracing of every run into a local trace store. Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.
+Early-stage project, built in phases. Done so far: tool-calling agents on Gemini, tracing of every run into a local trace store, evals with programmatic and LLM-judge checks, and a web UI with an interactive decision tree. Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.

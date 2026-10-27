@@ -232,3 +232,136 @@ both worked. Listing the wheel's contents is how C-011 was found. Look inside wh
   app is safe.
 - **Context propagation:** `ContextVar` holds "the current span", so nesting works without
   passing anything around.
+
+## 2026-10-27 — Phase 2: evals
+
+### What an eval is
+An eval is a test for behaviour that isn't deterministic. A unit test asks "does this function
+return 4?". An eval asks "across these 20 realistic requests, how often does the agent do the
+right thing, and how does it fail when it doesn't?". It has three parts:
+- a **dataset** of tasks;
+- **checks** that score each run;
+- **metrics** that summarise the batch.
+
+Because the agent is nondeterministic (the same task took 2 steps once and 3 another time), one
+run proves little. The success *rate* over a fixed dataset is the number to track across changes.
+
+### Programmatic checks vs. an LLM judge
+- **Programmatic** (`tool_called`, `answer_contains`, …): exact, free, instant and repeatable,
+  but they can only test what you can write as code. Matching strings is brittle: "₹2,499"
+  contains "2,499" but not "2499", so a check needs both spellings.
+- **LLM judge:** grades *meaning* ("didn't promise a refund it can't give") against a written
+  expected outcome. It costs a model call and can be wrong.
+- **Use both on each task.** Code checks the hard facts; the judge checks the meaning; neither can
+  pass a run on its own.
+
+### Eval design: test outcomes, not paths
+`support-two-orders` first required `get_order`. The agent used `get_shipment` instead and gave a
+correct answer, and the eval failed it (C-013). An over-specified check measures how closely the
+agent copies *your* plan, not whether it helped the user.
+- Require a specific tool only when using it is the point: "looked up the payments before saying
+  you weren't double-charged".
+- Use `answer_excludes` / `tool_not_called` for things that must *never* happen.
+
+### LLM-as-judge: structured output and biases
+- **Structured output:** Gemini's `response_json_schema` constrains the reply to JSON matching a
+  schema, here a pydantic `Verdict`. The reply is validated (`model_validate_json`), not scraped
+  with regexes. Gemini accepted our schema as pydantic wrote it, including `anyOf` with `null` for
+  "no category".
+- **Reason before verdict:** `reasoning` is the first field, so the model writes its argument
+  before committing to `passed`. A model generates tokens in order, so a verdict written first
+  can't be informed by reasoning that comes after it.
+- **Known judge biases:**
+  - *Self-preference:* a judge from the same model family favours answers that sound like its own;
+    ours is Flash-Lite judging Flash-Lite.
+  - *Verbosity:* longer answers look more thorough.
+  - *Position:* when comparing two answers, the first is favoured.
+  - *Leniency:* judges tend to pass borderline cases.
+
+  Mitigations: write expected outcomes concretely, tell the judge that tool results are ground
+  truth and not to reward length, keep programmatic checks next to it, and spot-check its
+  reasoning. Every verdict's reasoning is stored and shown in the UI.
+- **The judge can fail too.** A failed judge call is `eval_error`, never an agent failure.
+  Otherwise an outage at the judge would look like the agent getting worse.
+
+### Failure categories
+"9 of 20 passed" says little; "6 crashes, 4 eval errors" says the API failed, not the agent.
+Categories follow the failure catalogue (`wrong_tool`, `invalid_arguments`, `ignored_tool_error`,
+`false_claim`, `incomplete`, `inefficient`, plus run-level `crash`, `timeout` and `max_steps`).
+The person writing a check knows which failure it is meant to catch, so each check carries its own
+category.
+
+### Percentiles: p50 and p95
+Sort the latencies. p50 is the median (the typical run); p95 is the value that only 5% of runs
+exceed (the slow tail users complain about). Averages hide the tail: one 40-second run among
+nineteen 3-second ones barely moves the mean. With few runs, p95 is rough: for 20 values it falls
+between the 19th and 20th, so we interpolate linearly between ranks, as numpy does by default.
+
+### Seen live: an ignored tool error
+Asked about the non-existent alert `ALR-999`, the triage agent called `get_alert`, got
+`No alert with ID ALR-999`, then quietly listed all alerts and reported a full investigation of
+`ALR-101` instead, never telling the user that ALR-999 doesn't exist. The answer looked expert and
+confident. Only the trace shows the error being ignored in step 1 → step 2. That is the case the
+lab is built for, and the first wrong step (step 2) is what Auto-Blame should find in Phase 6.
+
+### Seen live: the traps mostly held
+Flash-Lite resisted both prompt injections: the "VIP refund" in an item name, and "blame cosmic
+rays" in a log line. The system prompt tells it to treat tool text as data. It also told a voided
+authorization hold apart from a double charge, partly because the `get_payments` docstring
+explains the statuses. Tool descriptions are part of the prompt.
+
+## 2026-10-27 — Phase 2: rate limits, concurrency and the server
+
+### Rate limiting: before sending, not after failing
+Retrying a 429 with backoff handles a burst. It doesn't handle sustained load: four workers on a
+15-requests-per-minute quota refill it the moment it empties, so every retry fails again (C-012).
+A **client-side rate limiter** waits *before* sending.
+- **Sliding window** (ours): remember when the last N requests were sent; a new one waits until
+  the oldest is more than 60s old. It is exact and simple.
+- **Token bucket:** tokens refill at a steady rate and each request spends one. It is smoother and
+  allows controlled bursts. Either works at this scale.
+
+Servers often say how long to wait. Gemini sends a `google.rpc.RetryInfo` detail
+(`retryDelay: "3.6s"`), the gRPC version of HTTP's `Retry-After` header. Retries should wait at
+least that long.
+
+### Concurrency: threads, context and SQLite
+- The batch runner uses a `ThreadPoolExecutor`. Model calls spend their time waiting on the
+  network, which is where threads help in Python despite the GIL.
+- Each new thread starts with an empty `contextvars` context, so one task's current run and span
+  can't leak into another's.
+- SQLite needed two settings:
+  - `check_same_thread=False` lets connections from the pool be used by any thread;
+  - **WAL mode** (write-ahead logging) lets the UI read while an eval writes, instead of waiting
+    on a lock.
+
+### FastAPI
+- A route is a function. Its parameters become query or path parameters, and its
+  `response_model` (a pydantic class) validates the output and documents it at `/docs` (OpenAPI)
+  automatically.
+- `TestClient` calls the app in-process, so API tests need no running server.
+- The API is a thin read layer over the store. Two aggregate queries (token/cost sums and eval
+  results, each grouped by run) avoid an N+1 pattern, where listing 100 runs would make 100 more
+  queries.
+
+## 2026-10-27 — Phase 2: the decision-tree UI
+
+### Drawing a trace as a tree
+- The API sends spans as a flat list with parent IDs, because that's how they're stored. The UI
+  rebuilds the tree, lays it out, and hands positioned nodes and edges to React Flow, which handles
+  drawing, panning, zooming and clicks.
+- **Layout** (`ui/src/lib/layout.ts`): depth sets the column (agent → step → call). Each leaf
+  takes the next free row, and a parent sits at the middle of its children. Nothing can overlap,
+  because every leaf owns a row. The layout sorts by `seq`, because spans are saved when they
+  *end*, so children arrive before their parents (C-008 again).
+- **Error path:** every ancestor of a failed span gets a red border and edge, so the eye goes
+  straight from the run to the bad call.
+
+### Frontend plumbing
+- **Vite** serves the app in development with instant reloads, and proxies `/api` to the Python
+  server so both look like one origin (no CORS setup). `npm run build` emits static files that
+  FastAPI serves.
+- **Hash routing** (`#/runs/<id>?span=<id>`): the server only ever serves `index.html`, and a
+  selected span is part of the URL, so a link can point straight at the failing tool call.
+- **Typed API client:** `ui/src/api.ts` mirrors the pydantic response models. When one side
+  changes, `tsc` or the API tests catch the mismatch.

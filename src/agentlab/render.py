@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from agentlab import semconv
-from agentlab.store import RunRow, SpanRow
+from agentlab.store import EvalResultRow, EvalRunRow, RunRow, RunTotals, SpanRow
 
 MAX_DETAIL = 90
 
@@ -91,3 +91,60 @@ def _truncate(text: str) -> str:
 
 def _money(usd: float) -> str:
     return f"${usd:.6f}"
+
+
+def render_eval(
+    eval_run: EvalRunRow,
+    results: list[EvalResultRow],
+    runs: dict[str, RunRow],
+    totals: dict[str, RunTotals],
+) -> str:
+    """An eval run's summary metrics, then one line per task."""
+    m = eval_run.metrics or {}
+    judge = eval_run.judge_model or "off"
+    lines = [f"eval {eval_run.id[:8]} · {eval_run.model} · judge {judge} · {eval_run.status}"]
+    if m:
+        rate = f"  ({m['success_rate']:.0%})" if m.get("success_rate") is not None else ""
+        lines += [
+            f"success   {m['passed']}/{m['tasks']}{rate}",
+            f"latency   p50 {_seconds(m.get('latency_p50_s'))} · "
+            f"p95 {_seconds(m.get('latency_p95_s'))}"
+            + (
+                f" · {m['rate_limit_wait_s']:.0f}s rate-limit wait left out"
+                if m.get("rate_limit_wait_s")
+                else ""
+            ),
+            f"cost      {_maybe_money(m.get('cost_per_task_usd'))} per task · "
+            f"{_maybe_money(m.get('total_cost_usd'))} total · "
+            f"judge {_maybe_money(m.get('judge_cost_usd'))}",
+        ]
+        if m.get("failure_categories"):
+            counts = ", ".join(f"{name} {n}" for name, n in m["failure_categories"].items())
+            lines.append(f"failures  {counts}")
+    lines.append("")
+    for r in results:
+        run = runs.get(r.run_id)
+        total = totals.get(r.run_id, RunTotals())
+        # Leave out time spent waiting for our rate limiter, as p50 and p95 do.
+        end = run.ended_at if run else None
+        duration = (end - run.started_at).total_seconds() - total.wait_s if end else None
+        mark = "✓" if r.passed else "✗"
+        cost = total.cost_usd
+        line = f"{mark} {r.task_id:28} {_seconds(duration):>7}  {_maybe_money(cost):>10}"
+        line += f"  run {r.run_id[:8]}"
+        if not r.passed:
+            failed = next((c for c in r.checks if not c["passed"]), None)
+            line += f"  {r.failure_category}"
+            if failed:
+                lines.append(line)
+                line = f"    {failed['type']}: {_truncate(failed['detail'])}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _seconds(value: float | None) -> str:
+    return f"{value:.2f}s" if value is not None else "–"
+
+
+def _maybe_money(usd: float | None) -> str:
+    return _money(usd) if usd is not None else "–"
