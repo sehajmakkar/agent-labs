@@ -721,3 +721,148 @@ button:disabled {
   opacity: 0.6;
   cursor: default;
 }
+
+/* Fork */
+
+.fork-button {
+  align-self: flex-start;
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  width: min(680px, 94vw);
+  max-height: 90vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modal-head,
+.modal-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.modal textarea,
+.modal input[type="number"] {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  width: 100%;
+}
+
+.modal textarea.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.field > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.field-row .field:last-child {
+  flex: 0 0 110px;
+}
+
+.card-accent {
+  border-color: var(--accent);
+}
+
+.verdict {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+
+.fork-groups {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.fork-groups h2 {
+  margin: 8px 0;
+}
+
+.change {
+  margin: 0;
+}
+
+.change dt {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.change dd {
+  margin: 2px 0 10px;
+}
+
+.family {
+  font-size: 13px;
+}
+
+.family summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.tree-list,
+.tree-list ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+}
+
+.tree-list {
+  border-left: none;
+  padding-left: 0;
+  margin-top: 4px;
+}
+
+.tree-list li {
+  padding: 1px 0;
+}
+
+.tree-list a.current {
+  font-weight: 700;
+  color: var(--text);
+}

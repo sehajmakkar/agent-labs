@@ -659,3 +659,139 @@ entry's status line.
   outside the process (no network, no tools), so there's nothing unsafe to guard yet.
 - **Rationale:** It makes replay visible in the demo, and it is the endpoint that fork extends in
   Phase 4.
+
+## D-037 — A fork replays by position up to the fork point, then goes live with the override applied at the boundary
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Options:**
+  - (a) Match the prefix by request hash, as replay does.
+  - (b) Match by position: the i-th model call gets the i-th recorded response.
+  - (c) Snapshot the agent's in-memory state at the fork point and restart from it.
+- **Decision:** (b).
+  - `ForkSession` serves recordings with `seq` before the fork point in call order: model calls by
+    position, tool calls by position with the tool name checked, clock and random reads by
+    source.
+  - Past the fork point it returns `LIVE`, and the boundaries make real calls.
+  - The override is applied *at the boundary*: the wrapped Gemini client swaps the system
+    instruction or model on live calls, and `Tool.invoke` swaps the forked tool's result.
+- **Trade-offs:**
+  - Positional matching assumes the agent makes the same calls in the same order up to the fork
+    point. A code change there goes unnoticed, except that tool names are checked.
+  - A changed prompt is sent only on live calls; the prefix's recorded responses were produced
+    under the old prompt.
+  - We accept both: (a) breaks as soon as the override changes the requests, which a prompt change
+    always does, and (c) is impossible in general, because an agent's state lives in arbitrary
+    Python objects. Freezing history and changing the future is exactly the question a fork asks.
+- **Rationale:** It works for any agent, ours or a customer's, without knowing its internals.
+
+## D-038 — The live part sees the world the original left: writes re-applied, the clock continued
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - A recorded write before the fork point is served from the recording *and* re-applied to its
+    simulator (result discarded). This is event sourcing: state is rebuilt by replaying the
+    events that changed it.
+  - Live clock reads continue the recorded timeline: the first one is pinned to the last recorded
+    value, and later ones move forward from there.
+- **Trade-offs:**
+  - It needs a simulator that accepts the same calls; a simulator that disagrees is silently
+    ignored.
+  - Wall time in a fork is the recorded time plus elapsed time, not today's date.
+  - We accept both. Without re-applying writes, a fork after a refund would see the payment as
+    still captured and could refund it again. Without continuing the clock, a recorded
+    `monotonic()` deadline compared with a fresh reading from another process would time out
+    instantly or never (C-017).
+- **Rationale:** A counterfactual is only meaningful if everything except the change is the same.
+
+## D-039 — Write tools in forks: simulated or simulator, otherwise the fork stops (closes D-034)
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - Live in a fork, a read tool runs normally.
+  - A write tool runs only if it is marked `@tool(kind="write", simulated=True)` (its function
+    only touches simulated state, like the demo backend), or has a simulator registered with
+    `@my_tool.simulator`.
+  - Otherwise `ForkBlocked` stops the run. Like `ReplayDivergence`, it is an `InterceptorStop`,
+    so the loop re-raises it instead of telling the model "tool error".
+- **Trade-offs:**
+  - Customers must write simulators for the write tools they want forks to reach.
+  - A blocked fork tells you nothing about the steps after the write.
+  - We accept both: the alternative is a debugging tool that can issue real refunds.
+- **Rationale:** "Writes never reach anything real" must hold in every mode, not just replay.
+
+## D-040 — Forks run N times next to N controls, scored by the source's task, compared with Fisher's exact test
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - A fork job runs N forks with the change and, by default, N controls: the same fork point,
+    no change.
+  - If the source run came from an eval task, every run is scored with that task's checks, and
+    the results are stored as eval results under the fork's ID.
+  - The two pass counts are compared with a two-sided Fisher's exact test, and the verdict says
+    "fixes it" only for more passes with p < 0.05.
+- **Trade-offs:**
+  - Controls double the cost.
+  - With N=5, only large effects can be significant: 5/5 vs 0/5 gives p = 0.008, but 5/5 vs 3/5
+    gives p = 0.44.
+  - Runs that aren't from a task can't be scored; their answers are shown to compare by eye.
+  - We accept all three: without a control, "4/5 pass" is meaningless if it would have been 4/5
+    anyway. That happened live: the ALR-999 run's control passed 3/5, so the original failure was
+    partly luck.
+- **Rationale:** The live part is sampled (C-001). A claim that a fix works must be a comparison of
+  two distributions, not of two runs.
+
+## D-041 — Fork jobs are queued in the database and run by workers, never by the API server
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - `POST /api/forks` only inserts a row into `forks` (status `queued`).
+  - Workers claim jobs with a compare-and-set UPDATE (`… WHERE status = 'queued'`; whoever
+    updates the row first owns the job) and run them with real agent code.
+  - `lab ui` starts an in-process worker thread for the demo agents (`--no-worker` turns it off).
+  - Customers run `lab worker --entry app.py:agent` in their own repo.
+- **Trade-offs:**
+  - The UI has to poll for progress.
+  - With no worker running, forks just wait (the UI says why).
+  - A crashed worker leaves its job "running"; there is no lease timeout yet.
+  - We accept these because the server can't run customer code safely or at all (D-009).
+- **Rationale:** A database queue needs no extra infrastructure (no Redis or Celery), and the
+  atomic claim is enough for a few workers.
+
+## D-042 — Traces and fork jobs travel over a narrow store RPC (`RemoteStore`), guarded by a token
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude). This carries out D-027's move of HTTP ingestion into Phase 4.
+- **Options:** REST endpoints per resource; OTLP export; or an RPC mirroring the store methods
+  that tracing, replay, forks and the worker use.
+- **Decision:**
+  - The RPC. `RemoteStore` has the same method names as `Store` and POSTs each call to
+    `/api/store/<method>`, with rows as JSON.
+  - `lab.init("http://lab:8000")` and `lab worker --server URL` use it.
+  - If `AGENTLAB_TOKEN` is set on the server, requests must send it as a bearer token.
+- **Trade-offs:**
+  - It ties the wire format to our store's method names.
+  - One HTTP request per span is slow over a real network (no batching).
+  - A single shared token is minimal security.
+  - OTLP would let other tools send traces, but can't carry our recordings or fork jobs.
+  - We accept all of this for now: eleven small handlers made the whole SDK and worker work
+    remotely with no other code changes, which a test shows by replaying and forking entirely
+    through HTTP.
+- **Rationale:** It is the smallest step from "the lab and the agent share one SQLite file" to "the
+  agent runs in the customer's repo and reports to a lab server".
+
+## D-043 — STORY.md: the narrative companion to the walkthrough
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (raised by the author)
+- **Decision:** `STORY.md` tells the project as one story, with tree diagrams: what was built, how,
+  why, and what comes next. CLAUDE.md requires it to be updated at the end of every phase.
+- **Trade-offs:** It is a third document to keep in sync, after WALKTHROUGH.md and PLAN.md's "How we
+  built it". We accept this because each has its own job: the walkthrough is for reading the code,
+  the PLAN sections for engineering detail, and the story for retelling.
+- **Rationale:** The author asked for a way to explain the whole project to someone from start to
+  finish.

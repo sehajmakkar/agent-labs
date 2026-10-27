@@ -15,7 +15,7 @@ export function Runs() {
     (r) =>
       (!agent || r.agent_name === agent) &&
       (!failedOnly || isFailure(r)) &&
-      (showReplays || r.mode !== "replay"),
+      (showReplays || r.mode === "record"),
   );
   const agents = [...new Set((runs.data ?? []).map((r) => r.agent_name))].sort();
 
@@ -44,7 +44,7 @@ export function Runs() {
               checked={showReplays}
               onChange={(e) => setShowReplays(e.target.checked)}
             />
-            Show replays
+            Show replays and forks
           </label>
           <button onClick={runs.reload}>Refresh</button>
         </div>
@@ -95,5 +95,6 @@ export function Runs() {
 
 function isFailure(run: RunSummary): boolean {
   if (run.mode === "replay") return !run.replay_report?.identical;
+  if (run.mode === "fork" && !run.eval) return run.status !== "completed";
   return run.eval ? !run.eval.passed : run.status !== "completed";
 }

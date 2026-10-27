@@ -53,7 +53,7 @@ The lab never hosts your agent. Your agent keeps running in your own code. The l
    def support_agent(message: str): ...
    ```
 
-   Recording and replay work today: `lab replay <run>` re-runs your agent with every model call, tool call, clock read and random number served from the recording. No network, no cost, and a `write` tool never runs twice. Read time and randomness through `lab.now()` and `lab.random()` so they replay too. Fork arrives next. [`examples/customer_app.py`](examples/customer_app.py) is a complete agent with its own loop, traced with just these lines.
+   Recording, replay and fork work today. `lab replay <run>` re-runs your agent with every model call, tool call, clock read and random number served from the recording: no network, no cost, and a `write` tool never runs twice. `lab fork <run> --step N` reruns from step N with one change, N times next to a control. A `write` tool runs in a fork only through a simulator you register (`@refund.simulator`). Read time and randomness through `lab.now()` and `lab.random()` so they replay too. To send runs to a lab server instead of a local file, use `lab.init("http://lab:8000")`. [`examples/customer_app.py`](examples/customer_app.py) is a complete agent with its own loop, traced with just these lines.
 
 2. **Run it where you already do.** Local development, a CI eval suite (`lab eval tasks.jsonl`), or production with sampling. Every run becomes a replayable trace.
 3. **Debug in the UI.** Open a failed run, then **Blame** → **Fork** from the blamed step with a fix → **Diff** the branches. Forks are run by `lab worker`, a process inside your repo, so they use your real agent code.
@@ -126,6 +126,10 @@ uv run lab evals              # past eval runs; `lab report <id>` prints one aga
 
 uv run lab replay <run-id>    # re-run a recorded run offline and check it reproduces exactly
 uv run lab fidelity           # replay recent runs: what share reproduce exactly?
+uv run lab fork <run-id> --step 3 --append-prompt "Always give the refund ID." -n 5
+                              # rerun from step 3 with the change, 5× vs 5 controls, p-value
+uv run lab worker --entry app.py:my_agent [--server http://lab:8000]
+                              # run fork jobs queued from the UI, with your agent's code
 
 (cd ui && npm install && npm run build)
 uv run lab ui                 # web UI at http://127.0.0.1:8000: runs, evals, decision trees
@@ -145,10 +149,10 @@ A dataset is a JSONL file, one task per line: an input, the expected outcome in 
             {"type": "judge"}]}
 ```
 
-Checks are programmatic (`tool_called`, `tool_not_called`, `answer_contains`, `answer_excludes`, `max_steps`) or an LLM judge with structured output. Every failed task gets a **failure category** (`wrong_tool`, `invalid_arguments`, `ignored_tool_error`, `false_claim`, `incomplete`, `timeout`, …), and each eval run reports success rate, p50/p95 latency and cost per task.
+Checks are programmatic (`tool_called`, `tool_not_called`, `answer_contains`, `answer_excludes`, `grounded` (IDs in the answer must come from tool results), `max_steps`) or an LLM judge with structured output. Every failed task gets a **failure category** (`wrong_tool`, `invalid_arguments`, `ignored_tool_error`, `false_claim`, `incomplete`, `timeout`, …), and each eval run reports success rate, p50/p95 latency and cost per task.
 
 The demo datasets include deliberate traps: a prompt injection hidden in an order's item name, a voided authorization hold that looks like a double charge, and incidents whose obvious suspect (a recent deploy) is not the cause.
 
 ## Project Status
 
-Early-stage project, built in phases. Done so far: tool-calling agents on Gemini, tracing of every run into a local trace store, evals with programmatic and LLM-judge checks, a web UI with an interactive decision tree, and **deterministic replay** (offline, verified span by span against the original run). Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.
+Early-stage project, built in phases. Done so far: tool-calling agents on Gemini, tracing of every run into a local or remote trace store, evals with programmatic and LLM-judge checks, a web UI with an interactive decision tree, **deterministic replay** (offline, verified span by span against the original run), and **Fork & Replay** (rerun from any step with a changed prompt, model or tool result; N runs against a control; Fisher's exact test; fork jobs run by workers in your own repo). Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.

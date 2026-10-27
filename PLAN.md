@@ -20,8 +20,8 @@ Sizes are relative (S / M / L), not calendar estimates.
 | 1 | Tracing SDK and trace store | ✅ Done |
 | 2 | Evals and the decision tree UI | ✅ Done |
 | 3 | Deterministic replay | ✅ Done |
-| 4 | Fork & Replay | ⏭️ Next |
-| 5 | Trajectory Diff | ⬜ Not started |
+| 4 | Fork & Replay | ✅ Done |
+| 5 | Trajectory Diff | ⏭️ Next |
 | 6 | Auto-Blame | ⬜ Not started |
 | 7 | Experiments, regressions and CI gate | ⬜ Not started |
 | 8 | Chaos testing *(stretch)* | ⬜ Not started |
@@ -413,26 +413,94 @@ can change *one* thing and everything else stays the same?
   failed-attempt recordings.
 - Customers can't yet register simulators for their own write tools (Phase 4).
 
-### Phase 4 — Fork & Replay · L · *first pitchable demo* · ⏭️ Next
+### Phase 4 — Fork & Replay · L · *first pitchable demo* · ✅ Done
 
-- [ ] "Fork from here" on any node (API and UI)
-- [ ] Override editor: change the prompt, the model, or a tool's output
-- [ ] Replay up to the fork point, then run live
-- [ ] Forks stored as child runs (`parent_run_id`, `fork_span_id`)
-- [ ] Each fork runs **N times** and reports a pass rate (C-001)
-- [ ] UI: the run family shown as a tree
-- [ ] `lab worker`: runs fork jobs inside the user's repo (D-009)
-- [ ] HTTP trace ingestion: the SDK can send runs to a lab server instead of local SQLite (D-027)
-- [ ] Simulators for customers' own write tools, used when a fork runs a write tool without a recording (D-034)
-- [ ] **Demo:** a failed support run, forked at the bad step with a fix, now passes 5/5
-- [ ] **Learnings** written up
-- [ ] **Start Tier 1 outreach**
+- [x] "Fork from here" on any step, model call or tool call: API (`POST /api/forks`) and UI (inspector button, deep link `?span=…&fork=1`)
+- [x] Override editor: change the system prompt, the model, or a tool's output (`ForkDialog`, `lab fork --prompt / --append-prompt / --model / --tool-output`)
+- [x] Replay up to the fork point (by position), then run live with the override applied at the boundary (`ForkSession`, D-037)
+- [x] The live part sees the original's world: recorded writes re-applied to simulators, clock continued (D-038, C-017)
+- [x] Simulators for customers' own write tools (`@tool.simulator`, `simulated=True`); otherwise `ForkBlocked` (D-039, closes C-003)
+- [x] Forks stored as child runs (`mode="fork"`, `parent_run_id`, `fork_span_id`, `fork_override`, `fork_id`)
+- [x] Each fork runs **N times** next to N controls, scored with the source's task, compared with Fisher's exact test (D-040, closes C-001)
+- [x] UI: fork results page (pass rates, p-value, verdict, both groups of runs) and the run family shown as a tree
+- [x] `lab worker`: runs fork jobs inside the user's repo (`--entry FILE.py:FUNCTION`), claimed from a database queue with compare-and-set (D-041); `lab ui` runs one for the demo agents
+- [x] HTTP trace ingestion: `lab.init("http://…")` and `lab worker --server URL` through `RemoteStore`, with an optional bearer token (D-042)
+- [x] New eval check `grounded`: IDs in the answer must come from tool results (found by a fork, see below)
+- [x] **Demo:** a failed support run, forked at the bad step with a fix, now passes 5/5. `support-refund-request` (no refund ID) forked at step 3 with one added sentence: **5/5 with the change, 0/5 without, p = 0.008**, steps 1–2 (including the refund) served from the recording, about $0.0004 per run. Also live: ALR-999 forked three times (0/5, a judge-fooled 4/5, then a grounded 5/5 vs 0/5); a remote worker over HTTP with no local database; the customer example forked via `--entry`.
+- [x] **Learnings** written up
+- [ ] **Start Tier 1 outreach**: your step. The demo is ready; see Phase 9 for the pitch kit.
 - **Learn:** state snapshots, copy-on-write, counterfactual reasoning, comparing distributions
 (pass rate across N samples) instead of single runs.
 - **Pitch:** Maxim (simulation → verified fix), Agnost (the "why" next to their "what"), Laminar,
 Raga AI.
 
-### Phase 5 — Trajectory Diff · M
+#### How we built it
+
+**The question:** if I change one thing at step N, does the run get better, and can I *prove*
+it was my change and not luck?
+
+1. **The fork session extends the replay session** (D-037).
+   - Up to the fork point (a recording `seq`), it serves recorded responses *by position*. An
+     override like a new prompt changes every request's hash, so hash matching would break.
+   - After the fork point it returns `LIVE`, and the boundaries make real calls.
+   - The override is applied *at the boundary*: the Gemini wrapper swaps the system instruction or
+     model; `Tool.invoke` swaps the forked tool's result. So it works for agents whose code we
+     don't control; the customer example was forked through `--entry`.
+2. **Where a fork starts** (`fork/point.py`).
+   - A step span: its model call is the first live call.
+   - A tool span: that tool's result is replaced, and the next model call is live.
+   - Agents with their own loop: the N-th model call.
+3. **Keeping the world consistent** (D-038, D-039).
+   - Recorded writes before the fork point are re-applied to the simulator: event sourcing.
+   - Live write tools run only through a simulator; otherwise `ForkBlocked` stops the run.
+   - Clock reads continue the recorded timeline, because monotonic clocks from different processes
+     can't be compared.
+4. **Statistics, not anecdotes** (D-040).
+   - Each job runs N forks and N controls, each scored with the source's eval task (stored as eval
+     results under the fork ID).
+   - A two-sided Fisher's exact test computes p from the 2×2 pass/fail table (20 lines,
+     hypergeometric probabilities with `math.comb`), and the verdict says "fixes it" only when
+     p < 0.05.
+5. **Jobs and workers** (D-041).
+   - `POST /api/forks` only inserts a `queued` row.
+   - Workers claim with a compare-and-set UPDATE, run the job with real agent code, and write the
+     summary back.
+   - `lab ui` starts a worker thread for the demo agents; customers run `lab worker --entry …` in
+     their repo.
+6. **Over HTTP** (D-042). `RemoteStore` mirrors the store's methods as POSTs to a whitelisted
+   `/api/store/<method>`, with an optional bearer token. Nothing else changed: tracing, replay,
+   forks and the worker run unmodified against it. A test drives a whole fork through HTTP, and a
+   live worker ran one with its own database file never created.
+7. **The UI.**
+   - The inspector's "⑂ Fork from here" opens an override editor prefilled with the recorded
+     prompt.
+   - The fork page polls the job and shows both pass rates, the p-value, the verdict and every run.
+   - Each run shows its family: the original, replays, and forks with their runs.
+8. **Verified:**
+   - 97 Python tests, including fork prefix/live switching, prompt/model/tool overrides, write
+     re-application, simulators, `ForkBlocked`, the clock, fork points, scoring with controls,
+     Fisher's test, the atomic claim, the worker, and the HTTP round trip with a token.
+   - Six live forks (support refund ID; three ALR-999 attempts; the customer app; a remote
+     worker).
+   - UI screenshots of the dialog, the fork page and the family tree.
+
+**What the live forks taught us, and worth saying in an interview:**
+- The first ALR-999 fix made things worse (0/5 vs 3/5): it read well but missed half the
+  expectation.
+- The second looked significant (4/5 vs 0/5, p = 0.048), but the agent had invented alert IDs that
+  the LLM judge accepted. A new exact `grounded` check rescored it to 1/5 vs 1/5. **A fork is only
+  as good as its checks.**
+- The third, grounded fix: 5/5 vs 0/5, p = 0.008.
+- The same control passed 3/5 in one batch and 0/5 in another: sampling noise is large at N=5.
+
+**Not done yet:**
+- Job leases: a crashed worker leaves its job "running" (C-018).
+- Batching and real authentication for remote ingestion.
+- Forking runs recorded before Phase 3 (they have no call order).
+- Comparing a fork's *paths* step by step, not just its pass rate. That's Phase 5's Trajectory
+  Diff.
+
+### Phase 5 — Trajectory Diff · M · ⏭️ Next
 
 - [ ] Step alignment: shared prefix, then sequence alignment on step type, tool name and argument
 similarity

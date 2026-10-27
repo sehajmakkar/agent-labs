@@ -84,10 +84,15 @@ _current_run: ContextVar[_ActiveRun | None] = ContextVar("agentlab_run", default
 _current_span: ContextVar[Span | None] = ContextVar("agentlab_span", default=None)
 
 
-def init(db: str | Path | Store) -> Store:
-    """Start saving runs to the trace store at `db` (a path, or an open Store)."""
+def init(db: str | Path | Store | Any) -> Store:
+    """Start saving runs: to a SQLite file (a path), an open Store, or a lab server
+    (`"http://host:8000"`, through `RemoteStore`)."""
     global _store
-    _store = db if isinstance(db, Store) else Store(db)
+    if isinstance(db, str) and db.startswith(("http://", "https://")):
+        from agentlab.remote import RemoteStore
+
+        db = RemoteStore(db)
+    _store = Store(db) if isinstance(db, str | Path) else db
     return _store
 
 
@@ -167,8 +172,7 @@ def agent_run(
         model=model,
         task_id=task_id,
         run_id=run_id or (session.replay_run_id if session else None),
-        mode="replay" if session else "record",
-        parent_run_id=session.source_run_id if session else None,
+        **(session.run_fields() if session else {"mode": "record"}),
     )
     active = _ActiveRun(run_id, store)
     token = _current_run.set(active)
@@ -204,6 +208,7 @@ def agent(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
                 current.output = result
                 return result
 
+        wrapper.agent_name = name  # lets `lab worker --entry` know which runs it can fork
         return wrapper
 
     return decorate

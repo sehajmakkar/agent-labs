@@ -15,7 +15,7 @@ from typing import Literal
 
 from agentlab import determinism, semconv
 from agentlab.llm.base import LLMClient, LLMResponse, Message, ToolCall, ToolResult, Usage
-from agentlab.replay.session import ReplayDivergence
+from agentlab.replay.session import InterceptorStop
 from agentlab.retry import RetryPolicy, call_with_retries
 from agentlab.tools import Tool, describe_error
 from agentlab.tracing import agent_run, span
@@ -147,8 +147,8 @@ def _execute(call: ToolCall, tools_by_name: dict[str, Tool]) -> ToolResult:
         return ToolResult(call, {"error": error}, is_error=True)
     try:
         output = tool.invoke(call.args, call_id=call.id)
-    except ReplayDivergence:
-        raise  # not the tool's error: the replay no longer matches the recording
+    except InterceptorStop:
+        raise  # not the tool's error: a replay diverged, or a fork hit an unsafe write
     except Exception as e:
         return ToolResult(call, {"error": describe_error(e)}, is_error=True)
     return ToolResult(call, output if isinstance(output, dict) else {"result": output})

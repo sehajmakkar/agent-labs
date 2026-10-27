@@ -1,5 +1,6 @@
 import { useRoute } from "./lib/hooks";
 import { EvalView, Evals } from "./pages/Evals";
+import { ForkView } from "./pages/ForkView";
 import { RunView } from "./pages/RunView";
 import { Runs } from "./pages/Runs";
 
@@ -21,9 +22,12 @@ export function App() {
       </nav>
       <main>
         {route.page === "runs" && <Runs />}
-        {route.page === "run" && <RunView id={route.id} spanId={route.span} />}
+        {route.page === "run" && (
+          <RunView id={route.id} spanId={route.span} openFork={route.fork} />
+        )}
         {route.page === "evals" && <Evals />}
         {route.page === "eval" && <EvalView id={route.id} />}
+        {route.page === "fork" && <ForkView id={route.id} />}
       </main>
     </div>
   );

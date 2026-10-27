@@ -14,6 +14,7 @@ are the tests. Each check type knows which failure category to report when it fa
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -113,6 +114,31 @@ class AnswerExcludes(_Check):
         return self._result(True, "answer avoids the excluded phrases")
 
 
+class Grounded(_Check):
+    """Every identifier in the answer matching `pattern` (e.g. `ALR-\\d+`) must appear in the user's
+    message or in some tool result. It catches invented IDs, which a judge reading prose misses."""
+
+    type: Literal["grounded"] = "grounded"
+    pattern: str
+    category: FailureCategory = "false_claim"
+
+    def evaluate(self, traj, task, judge):
+        seen = (
+            traj.message
+            + " "
+            + " ".join(
+                json.dumps(c.output, default=str) for c in traj.tool_calls if c.error is None
+            )
+        )
+        mentioned = sorted(set(re.findall(self.pattern, traj.answer or "")))
+        invented = [m for m in mentioned if m not in seen]
+        if invented:
+            return self._result(
+                False, f"answer mentions {', '.join(invented)}, which no tool returned"
+            )
+        return self._result(True, f"all {len(mentioned)} IDs in the answer came from the tools")
+
+
 class MaxSteps(_Check):
     """The run used at most `limit` steps (model calls)."""
 
@@ -147,7 +173,7 @@ class Judge(_Check):
 
 
 Check = Annotated[
-    ToolCalled | ToolNotCalled | AnswerContains | AnswerExcludes | MaxSteps | Judge,
+    ToolCalled | ToolNotCalled | AnswerContains | AnswerExcludes | Grounded | MaxSteps | Judge,
     Field(discriminator="type"),
 ]
 
@@ -179,6 +205,15 @@ def load_dataset(path: str | Path) -> list[Task]:
     duplicates = sorted({i for i in ids if ids.count(i) > 1})
     if duplicates:
         raise ValueError(f"{path}: duplicate task IDs: {', '.join(duplicates)}")
+    return tasks
+
+
+def load_tasks(directory: str | Path) -> dict[str, Task]:
+    """Every task in every `*.jsonl` file of a directory, by ID. Forks use it to score their runs
+    with the source run's task."""
+    tasks: dict[str, Task] = {}
+    for path in sorted(Path(directory).glob("*.jsonl")):
+        tasks |= {t.id: t for t in load_dataset(path)}
     return tasks
 
 

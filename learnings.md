@@ -441,3 +441,87 @@ Adding columns to existing tables is the easy kind of migration: `ALTER TABLE �
 nullable columns so old rows stay valid. `Store` does that automatically on startup (D-031).
 Renames and type changes are the hard kind; they need versioned migrations (Alembic) and data
 copying.
+
+## 2026-10-27 — Phase 4: Fork & Replay
+
+### A fork is a counterfactual experiment
+Replay asks "does the code reproduce what happened?". A fork asks "what *would* have happened if one
+thing had been different at step N?". The recipe:
+1. Replay everything before step N from the recording. History is frozen, so nothing else
+   changes.
+2. Apply one change (a prompt, a model, a tool's result).
+3. Run live from step N.
+4. Do it N times, and N more times *without* the change.
+5. Compare the two pass rates.
+
+### Matching by position, not hash
+Replay matches each call by the hash of its request. A fork can't: changing the system prompt
+changes *every* request's hash, including the frozen ones before the fork point. So before the fork
+point a fork matches by position ("the 2nd model call gets the 2nd recorded reply"), checking tool
+names as a safety net. The override is applied at the boundary, inside the wrapped client, so it
+works for agents whose code we can't edit; the customer example proved it.
+
+### Rebuilding state: event sourcing
+If the original run refunded P-902 at step 2, a fork from step 3 must see P-902 as refunded. The
+refund itself is served from the recording (never re-executed for real), but the recorded call is
+also *re-applied to the simulator*. That's **event sourcing**: state is the result of replaying the
+events that changed it, rather than a stored snapshot. It works because writes go through one
+boundary (`Tool.invoke`).
+
+### Clocks from two processes don't mix
+`time.monotonic()` counts from an arbitrary point per process. A deadline recorded in one process
+compared with a reading from another is meaningless (C-017). A fork continues the recorded
+timeline: the first live reading is pinned to the last recorded one, and later ones move forward
+by real elapsed time.
+
+### Test doubles: simulator, fake, stub
+- A **stub** returns canned answers.
+- A **fake** has a working but simplified implementation, like our in-memory `SupportBackend`.
+- A **mock** also checks how it was called.
+
+Our write-tool "simulators" are fakes: they behave like the real system, minus the real-world
+effect. A fork must never reach a real write tool, so a write tool without one stops the fork
+(`ForkBlocked`) instead of guessing.
+
+### Controls and Fisher's exact test
+The live part of a fork is sampled, so "5/5 with my fix" means nothing alone. Maybe it would have
+been 5/5 anyway. A **control** (same fork point, no change) gives the baseline. Then:
+- **Fisher's exact test** asks: if the fix did nothing, how likely is a split this uneven? For
+  5/5 vs 0/5, p = 2/252 ≈ 0.008. For 5/5 vs 3/5, p = 0.44.
+- **Small N only detects big effects.** N=5 per group can confirm "fails every time → passes
+  every time", but not a 60% → 100% improvement. That needs more runs.
+- **Seen live:** the *same* control (ALR-999, step 2, no change) passed 3/5 in one batch and 0/5
+  in another. Two batches of five can easily disagree that much when the true rate is around 30%.
+  That's sampling noise, and it's why a single fork result is only an estimate.
+
+### Seen live: three forks, three lessons (ALR-999)
+1. **The obvious fix made it worse: 0/5 vs 3/5.** "Say it doesn't exist and stop" was followed
+   exactly, but the task also wanted the agent to offer the alerts that *are* firing. Lesson: a fix
+   that reads well can fail every time. Measure it.
+2. **A "significant" fix that was fake: 4/5 vs 0/5, p = 0.048.** The agent listed alerts without
+   calling `list_alerts`: ALR-42, ALR-404, all invented. The LLM judge passed them. Rescored with a
+   new programmatic `grounded` check (every ID in the answer must appear in a tool result), it was
+   1/5 vs 1/5: no effect. Lesson: **a fork is only as trustworthy as its checks**, and judges are
+   bad at spotting invented identifiers. Cheap exact checks catch them.
+3. **The real fix: 5/5 vs 0/5, p = 0.008.** "Say so, then call `list_alerts`, name only what it
+   returns, and ask which one to investigate." Every fork run listed real alerts; every control
+   still went off to investigate checkout.
+
+The refund-ID failure was simpler: one prompt sentence gave 5/5 vs 0/5, with steps 1–2 (including
+the refund) served from the recording and only step 3 live, at about $0.0004 per run.
+
+### A job queue in a database table
+A fork is a job: queued by the UI, run by a worker that has the agent's code. The queue is the
+`forks` table. Two workers may poll at once, so claiming is a **compare-and-set**:
+`UPDATE forks SET status='running' WHERE id=? AND status='queued'`. Only one UPDATE can change
+the row, and `rowcount` says who won. No Redis or Celery is needed at this scale. The missing piece
+is a **lease** (a heartbeat with a timeout), so a crashed worker's job gets re-queued (C-018).
+
+### Moving the store behind HTTP
+`RemoteStore` has the same method names as `Store`, and each call becomes a POST. Tracing, replay,
+forks and the worker don't know the difference: that's coding to an interface. Things to know:
+- Rows travel as JSON. Pydantic validates them back into rows on the other side, including turning
+  ISO strings back into datetimes.
+- The endpoint is an explicit whitelist of 11 methods, never "call any method by name".
+- A bearer token (`Authorization: Bearer …`) is the simplest authentication. Real deployments add
+  TLS, per-worker tokens and batching, because one request per span is slow over the internet.

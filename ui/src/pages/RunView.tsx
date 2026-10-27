@@ -1,12 +1,21 @@
 import { api } from "../api";
 import { Inspector } from "../components/Inspector";
+import { FamilyTree } from "../components/FamilyTree";
 import { ReplayPanel } from "../components/ReplayPanel";
 import { Outcome } from "../components/RunStatus";
 import { TraceTree } from "../components/TraceTree";
 import { activeSeconds, money, seconds, tokens } from "../lib/format";
 import { navigate, useLoad } from "../lib/hooks";
 
-export function RunView({ id, spanId }: { id: string; spanId?: string }) {
+export function RunView({
+  id,
+  spanId,
+  openFork = false,
+}: {
+  id: string;
+  spanId?: string;
+  openFork?: boolean;
+}) {
   const detail = useLoad(() => api.run(id), id);
   if (detail.error) return <p className="page error-text">Could not load run: {detail.error}</p>;
   if (!detail.data) return <p className="page muted">Loading…</p>;
@@ -37,6 +46,7 @@ export function RunView({ id, spanId }: { id: string; spanId?: string }) {
           <Stat label="Run" value={run.id.slice(0, 8)} mono />
         </div>
         <ReplayPanel run={run} replays={replays} />
+        <FamilyTree runId={run.id} currentId={run.id} />
         <div className="run-io">
           <div>
             <div className="eyebrow">User</div>
@@ -66,7 +76,16 @@ export function RunView({ id, spanId }: { id: string; spanId?: string }) {
         <div className="tree">
           <TraceTree spans={spans} selectedId={spanId} onSelect={(s) => select(s)} />
         </div>
-        {selected && <Inspector span={selected} onClose={() => select()} />}
+        {selected && (
+          <Inspector
+            key={selected.id}
+            span={selected}
+            spans={spans}
+            run={run}
+            openFork={openFork}
+            onClose={() => select()}
+          />
+        )}
       </div>
     </div>
   );

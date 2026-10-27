@@ -32,7 +32,9 @@ export type RunSummary = {
   tokens: number;
   cost_usd: number | null;
   parent_run_id: string | null;
-  mode: "record" | "replay";
+  mode: "record" | "replay" | "fork";
+  fork_id: string | null;
+  fork_override: Override | null;
   replay_report: ReplayReport | null;
   eval: EvalSummary | null;
 };
@@ -74,7 +76,68 @@ export type Span = {
   cost_usd: number | null;
 };
 
-export type RunDetail = { run: RunSummary; spans: Span[]; replays: RunSummary[] };
+export type RunDetail = {
+  run: RunSummary;
+  spans: Span[];
+  replays: RunSummary[];
+  forks: ForkInfo[];
+};
+
+export type Override = { system_prompt?: string; model?: string; tool_output?: unknown };
+
+export type ForkRunResult = {
+  run_id: string;
+  status: string;
+  answer: string | null;
+  error: string | null;
+  passed: boolean | null;
+  category: string | null;
+};
+
+export type ForkGroup = { n: number; passed: number | null; runs: ForkRunResult[] };
+
+export type ForkSummary = {
+  label: string;
+  override: Override;
+  scored: boolean;
+  fork: ForkGroup;
+  control: ForkGroup | null;
+  p_value: number | null;
+  verdict: string;
+};
+
+export type ForkInfo = {
+  id: string;
+  source_run_id: string;
+  span_id: string;
+  label: string;
+  override: Override | null;
+  n: number;
+  control: boolean;
+  status: "queued" | "running" | "done" | "error";
+  worker: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  summary: ForkSummary | null;
+  error: string | null;
+};
+
+export type ForkDetail = { fork: ForkInfo; source: RunSummary; runs: RunSummary[] };
+
+export type FamilyNode = {
+  run: RunSummary;
+  replays: RunSummary[];
+  forks: { fork: ForkInfo; runs: FamilyNode[] }[];
+};
+
+export type ForkRequest = {
+  run_id: string;
+  span_id: string;
+  override: Override;
+  n: number;
+  control: boolean;
+};
 
 export type Recording = { kind: string; request_hash: string; request: any; response: any };
 
@@ -125,6 +188,15 @@ export const api = {
   },
   run: (id: string) => get<RunDetail>(`/api/runs/${id}`),
   replay: (id: string) => get<ReplayResponse>(`/api/runs/${id}/replay`, { method: "POST" }),
+  family: (id: string) => get<FamilyNode>(`/api/runs/${id}/family`),
+  fork: (id: string) => get<ForkDetail>(`/api/forks/${id}`),
+  createFork: (request: ForkRequest) =>
+    get<ForkInfo>("/api/forks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    }),
+  models: () => get<Record<string, string>>("/api/models"),
   recordings: (spanId: string) => get<Recording[]>(`/api/spans/${spanId}/recordings`),
   evals: () => get<EvalRun[]>("/api/evals"),
   eval: (id: string) => get<EvalDetail>(`/api/evals/${id}`),

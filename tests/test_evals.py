@@ -241,3 +241,22 @@ def test_run_eval_without_judge_drops_judge_checks(store):
     )
     (result,) = store.eval_results(eval_id)
     assert result.passed and result.checks == []
+
+
+def test_grounded_catches_ids_no_tool_returned():
+    t = task({"type": "grounded", "pattern": r"ALR-\d+"})
+    real = Trajectory(
+        run_id="r",
+        status="completed",
+        message="Look into ALR-999",
+        answer="",
+        tool_calls=[
+            ToolCallRecord("list_alerts", {}, output={"alerts": [{"alert_id": "ALR-101"}]})
+        ],
+    )
+    real.answer = "ALR-999 doesn't exist. Firing now: ALR-101."
+    assert score(t, real, None).passed
+    real.answer = "ALR-999 doesn't exist. Firing now: ALR-42 and ALR-101."
+    result = score(t, real, None)
+    assert (result.passed, result.category) == (False, "false_claim")
+    assert "ALR-42" in result.checks[0].detail

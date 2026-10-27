@@ -13,6 +13,13 @@ a recording of its arguments and result. That makes tools one of the two interce
 During a replay the function is never called, whatever its kind: the recorded result is returned,
 or the recorded error raised again. So replaying a run can't repeat a refund or an email
 (challenges.md C-002).
+
+In a fork, calls after the fork point are live. A read tool runs as usual. A write tool must never
+reach a real system, so it runs only if it has a stand-in:
+- `@tool(kind="write", simulated=True)`: the function itself only touches simulated state;
+- or a simulator registered with `@my_tool.simulator`.
+Otherwise the fork stops (`ForkBlocked`). Before the fork point, recorded writes are re-applied to
+the simulator, so the live part sees the world as the original run left it.
 """
 
 import copy
@@ -30,13 +37,26 @@ from agentlab.tracing import request_hash, span
 ToolKind = Literal["read", "write"]
 
 
-@dataclass(frozen=True)
+@dataclass(eq=False)
 class Tool:
     name: str
     description: str
     kind: ToolKind
     fn: Callable[..., Any]
     args_model: type[BaseModel]
+    simulated: bool = False  # True: `fn` only touches simulated state, so a fork may run it
+    simulator_fn: Callable[..., Any] | None = None  # used in place of `fn` in a fork
+
+    def simulator(self, fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Register the function a fork runs instead of this (real) write tool."""
+        self.simulator_fn = fn
+        return fn
+
+    def _fork_fn(self) -> Callable[..., Any] | None:
+        """What a fork may run for this tool, or None if nothing is safe."""
+        if self.kind == "read" or self.simulated:
+            return self.fn
+        return self.simulator_fn
 
     @property
     def parameters_schema(self) -> dict[str, Any]:
@@ -58,14 +78,27 @@ class Tool:
         request = {"tool": self.name, "args": args}
         session = replay.current()
         with span("tool", f"execute_tool {self.name}", input=args, attributes=attributes) as s:
+            fn = self.fn
             if session:
-                return self._replay(s, session, request)
+                served = session.take("tool", request, request_hash(request))
+                if served is not replay.LIVE:
+                    return self._replay(s, session, request, served)
+                # A fork past its fork point: only a safe stand-in may run.
+                fn = self._fork_fn()
+                if fn is None:
+                    s.error = f"ForkBlocked: {self.name} is a write tool with no simulator"
+                    raise replay.ForkBlocked(
+                        f"{self.name} is a write tool with no simulator, so a fork can't run it. "
+                        f"Register one with @{self.name}.simulator, or mark the tool simulated."
+                    )
+                if fn is not self.fn:
+                    s.attributes[semconv.SIMULATED] = True
             try:
                 validated = self.args_model.model_validate(args)
                 # A snapshot, not a reference: if the tool returned its own live state, a later
                 # write would otherwise change this result inside the conversation history too
                 # (challenges.md C-016).
-                output = copy.deepcopy(self.fn(**dict(validated)))
+                output = copy.deepcopy(fn(**dict(validated)))
             except Exception as e:
                 s.error = describe_error(e)
                 s.record(request, {"error": s.error})
@@ -74,22 +107,36 @@ class Tool:
             s.record(request, {"output": output})
             return output
 
-    def _replay(self, s: Any, session: replay.ReplaySession, request: dict[str, Any]) -> Any:
-        recorded = session.take("tool", request, request_hash(request))
+    def _replay(
+        self, s: Any, session: replay.ReplaySession, request: dict[str, Any], recorded: Any
+    ) -> Any:
         s.attributes[semconv.REPLAYED] = True
         s.record(request, recorded)
         if "error" in recorded:
             s.error = recorded["error"]
             raise ReplayedToolError(recorded["error"])
+        if isinstance(session, replay.ForkSession) and self.kind == "write":
+            self._reapply(request["args"])
         s.output = recorded["output"]
         return recorded["output"]
+
+    def _reapply(self, args: dict[str, Any]) -> None:
+        """Before the fork point: apply a recorded write to the simulator, so the state the live
+        part sees matches the original run. The result is discarded; the recorded one is used."""
+        fn = self._fork_fn()
+        if fn is None:
+            return
+        try:
+            fn(**dict(self.args_model.model_validate(args)))
+        except Exception:
+            pass  # the recorded call succeeded; a simulator that disagrees can't change history
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         bound = inspect.signature(self.fn).bind(*args, **kwargs)
         return self.invoke(dict(bound.arguments))
 
 
-def tool(kind: ToolKind) -> Callable[[Callable[..., Any]], Tool]:
+def tool(kind: ToolKind, *, simulated: bool = False) -> Callable[[Callable[..., Any]], Tool]:
     def decorate(fn: Callable[..., Any]) -> Tool:
         return Tool(
             name=fn.__name__,
@@ -97,6 +144,7 @@ def tool(kind: ToolKind) -> Callable[[Callable[..., Any]], Tool]:
             kind=kind,
             fn=fn,
             args_model=_args_model(fn),
+            simulated=simulated,
         )
 
     return decorate

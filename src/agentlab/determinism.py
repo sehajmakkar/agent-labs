@@ -41,7 +41,13 @@ def _read(kind: str, source: str, live: Callable[[], float]) -> float:
         session.fallbacks[kind] += 1
         value = live()
     else:
-        value = session.take(kind, request, tracing.request_hash(request))["value"]
+        served = session.take(kind, request, tracing.request_hash(request))
+        if served is replay.LIVE:  # a fork, past its fork point
+            value = live()
+            if kind == "clock":
+                value = session.continue_clock(source, value)
+        else:
+            value = served["value"]
 
     span = tracing.current_span()
     if span is not None and span.run_id:

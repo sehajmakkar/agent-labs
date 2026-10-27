@@ -1,7 +1,11 @@
 """The lab's HTTP API, read by the web UI (`lab ui`).
 
-A thin layer over the trace store. Every endpoint reads, except `POST /api/runs/{id}/replay`, which
-is safe to offer because a replay calls nothing outside the process: no model, no tools.
+A thin layer over the trace store. Most endpoints read. The writes:
+- `POST /api/runs/{id}/replay`: safe, because a replay calls nothing outside the process;
+- `POST /api/forks`: only *queues* a fork job. A worker running the agent's own code executes it
+  (`fork/worker.py`), never this server;
+- `POST /api/store/{method}`: the narrow RPC that `RemoteStore` uses, so workers and SDKs elsewhere
+  can send runs here. Guarded by `AGENTLAB_TOKEN` when that is set.
 
 Response models are pydantic classes, so FastAPI validates what we send and documents every
 endpoint at /docs (OpenAPI) for free.
@@ -10,18 +14,24 @@ The built UI (`ui/dist`, from `npm run build`) is served at `/` when it exists. 
 development, Vite serves the UI instead and forwards `/api` requests here.
 """
 
+import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agentlab.evals.categories import DESCRIPTIONS
+from agentlab.fork.point import resolve_fork_point
+from agentlab.replay.session import Override
 from agentlab.store import (
     EvalResultRow,
     EvalRunRow,
+    ForkRow,
+    RecordingRow,
     RunRow,
     RunTotals,
     SpanRow,
@@ -56,7 +66,9 @@ class RunSummary(BaseModel):
     tokens: int
     cost_usd: float | None
     parent_run_id: str | None
-    mode: str  # record | replay
+    mode: str  # record | replay | fork
+    fork_id: str | None
+    fork_override: dict[str, Any] | None  # None on a control run
     replay_report: dict[str, Any] | None
     eval: EvalSummary | None
 
@@ -80,10 +92,58 @@ class Span(BaseModel):
     cost_usd: float | None
 
 
+class ForkInfo(BaseModel):
+    id: str
+    source_run_id: str
+    span_id: str
+    label: str
+    override: dict[str, Any] | None
+    n: int
+    control: bool
+    status: str
+    worker: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    summary: dict[str, Any] | None
+    error: str | None
+
+
 class RunDetail(BaseModel):
     run: RunSummary
     spans: list[Span]
     replays: list[RunSummary]  # replays of this run, newest first
+    forks: list[ForkInfo]  # fork jobs started from this run, newest first
+
+
+class ForkRequest(BaseModel):
+    run_id: str
+    span_id: str
+    override: Override = Override()
+    n: int = 5
+    control: bool = True
+
+
+class ForkDetail(BaseModel):
+    fork: ForkInfo
+    source: RunSummary
+    runs: list[RunSummary]
+
+
+class FamilyNode(BaseModel):
+    """A run, its replays, and the fork jobs started from it (each with its runs)."""
+
+    run: RunSummary
+    replays: list[RunSummary]
+    forks: list["FamilyFork"]
+
+
+class FamilyFork(BaseModel):
+    fork: ForkInfo
+    runs: list[FamilyNode]
+
+
+FamilyNode.model_rebuild()  # resolve the "FamilyFork" forward reference
 
 
 class ReplayResponse(BaseModel):
@@ -134,7 +194,75 @@ def create_app(store: Store, ui_dist: Path | None = UI_DIST) -> FastAPI:
             run=summary,
             spans=[_span(s) for s in store.spans(run_id)],
             replays=_summaries(store, store.replays_of(run_id)),
+            forks=[_fork(f) for f in store.forks_of(run_id)],
         )
+
+    @app.get("/api/runs/{run_id}/family", response_model=FamilyNode)
+    def family(run_id: str):
+        """The whole family of a run, from its root: replays, forks and their runs."""
+        run = store.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, f"No run {run_id}")
+        while run.parent_run_id and (parent := store.get_run(run.parent_run_id)):
+            run = parent
+        return _family(store, run, depth=0)
+
+    @app.post("/api/forks", response_model=ForkInfo)
+    def create_fork(request: ForkRequest):
+        if store.get_run(request.run_id) is None:
+            raise HTTPException(404, f"No run {request.run_id}")
+        if not 1 <= request.n <= 20:
+            raise HTTPException(400, "n must be between 1 and 20")
+        try:
+            point = resolve_fork_point(store, request.run_id, request.span_id)
+        except (LookupError, ValueError) as e:
+            raise HTTPException(400, str(e)) from e
+        if request.override.tool_output is not None and point.kind != "tool":
+            raise HTTPException(
+                400, "A tool output can only be changed when forking at a tool call"
+            )
+        fork_id = store.create_fork(
+            source_run_id=request.run_id,
+            span_id=point.span_id,
+            label=point.label,
+            override=request.override.model_dump(exclude_none=True),
+            n=request.n,
+            control=request.control,
+        )
+        return _fork(store.get_fork(fork_id))
+
+    @app.get("/api/forks/{fork_id}", response_model=ForkDetail)
+    def get_fork(fork_id: str):
+        try:
+            fork = store.find_fork(fork_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        (source,) = _summaries(store, [store.get_run(fork.source_run_id)])
+        return ForkDetail(
+            fork=_fork(fork), source=source, runs=_summaries(store, store.fork_runs(fork.id))
+        )
+
+    @app.get("/api/models")
+    def models() -> dict[str, str]:
+        from agentlab.config import load_settings
+
+        settings = load_settings()
+        return {"flash-lite": settings.flash_lite_model, "flash": settings.flash_model}
+
+    rpc = _rpc_handlers(store)
+
+    @app.post("/api/store/{method}")
+    def store_rpc(
+        method: str,
+        args: Annotated[dict[str, Any], Body()],
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> Any:
+        token = os.environ.get("AGENTLAB_TOKEN")
+        if token and authorization != f"Bearer {token}":
+            raise HTTPException(401, "Missing or wrong AGENTLAB_TOKEN")
+        if method not in rpc:
+            raise HTTPException(404, f"No store method {method!r}")
+        return rpc[method](args)
 
     @app.post("/api/runs/{run_id}/replay", response_model=ReplayResponse)
     def replay(run_id: str):
@@ -211,6 +339,8 @@ def _summary(run: RunRow, totals: RunTotals, result: EvalResultRow | None) -> Ru
         cost_usd=totals.cost_usd,
         parent_run_id=run.parent_run_id,
         mode=run.mode or "record",
+        fork_id=run.fork_id,
+        fork_override=run.fork_override,
         replay_report=run.replay_report,
         eval=EvalSummary(
             eval_run_id=result.eval_run_id,
@@ -222,6 +352,60 @@ def _summary(run: RunRow, totals: RunTotals, result: EvalResultRow | None) -> Ru
         if result
         else None,
     )
+
+
+def _fork(f: ForkRow) -> ForkInfo:
+    return ForkInfo(
+        **f.model_dump(exclude={"created_at", "started_at", "finished_at"}),
+        created_at=_utc(f.created_at),
+        started_at=_utc(f.started_at) if f.started_at else None,
+        finished_at=_utc(f.finished_at) if f.finished_at else None,
+    )
+
+
+def _family(store: Store, run: RunRow, depth: int) -> FamilyNode:
+    forks = store.forks_of(run.id) if depth < 3 else []
+    (summary,) = _summaries(store, [run])
+    return FamilyNode(
+        run=summary,
+        replays=_summaries(store, store.replays_of(run.id)),
+        forks=[
+            FamilyFork(
+                fork=_fork(f), runs=[_family(store, r, depth + 1) for r in store.fork_runs(f.id)]
+            )
+            for f in forks
+        ],
+    )
+
+
+def _rpc_handlers(store: Store) -> dict[str, Callable[[dict[str, Any]], Any]]:
+    """The store methods a `RemoteStore` may call, with their arguments rebuilt from JSON."""
+
+    def dump(row: Any) -> Any:
+        return row.model_dump(mode="json") if row is not None else None
+
+    return {
+        "create_run": lambda a: store.create_run(**a),
+        "finish_run": lambda a: store.finish_run(
+            a["run_id"], status=a["status"], output=a["output"], error=a["error"]
+        ),
+        "save_span": lambda a: store.save_span(
+            SpanRow.model_validate(a["span"]),
+            [RecordingRow.model_validate(r) for r in a["recordings"]],
+        ),
+        "set_replay_report": lambda a: store.set_replay_report(a["run_id"], a["report"]),
+        "save_eval_result": lambda a: store.save_eval_result(
+            EvalResultRow.model_validate(a["result"])
+        ),
+        "get_run": lambda a: dump(store.get_run(a["run_id"])),
+        "spans": lambda a: [dump(s) for s in store.spans(a["run_id"])],
+        "run_recordings": lambda a: [dump(r) for r in store.run_recordings(a["run_id"])],
+        "claim_fork": lambda a: dump(store.claim_fork(a["agent_names"], a["worker"])),
+        "get_fork": lambda a: dump(store.get_fork(a["fork_id"])),
+        "finish_fork": lambda a: store.finish_fork(
+            a["fork_id"], summary=a["summary"], error=a["error"]
+        ),
+    }
 
 
 def _span(s: SpanRow) -> Span:

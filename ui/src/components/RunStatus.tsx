@@ -13,15 +13,17 @@ export function Outcome({ run }: { run: RunSummary }) {
       </span>
     );
   }
+  const prefix = run.mode === "fork" ? (run.fork_override ? "⑂ " : "⑂ control · ") : "";
   if (run.eval) {
     return run.eval.passed ? (
-      <span className="pill pill-pass">✓ passed</span>
+      <span className="pill pill-pass">{prefix}✓ passed</span>
     ) : (
       <span className="pill pill-fail" title={firstFailure(run)}>
-        ✗ {run.eval.failure_category ?? "failed"}
+        {prefix}✗ {run.eval.failure_category ?? "failed"}
       </span>
     );
   }
+  if (run.mode === "fork") return <span className="pill">{prefix + run.status}</span>;
   if (run.status === "completed") return <span className="pill">completed</span>;
   return <span className="pill pill-fail">{run.status}</span>;
 }

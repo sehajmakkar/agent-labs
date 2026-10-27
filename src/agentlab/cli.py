@@ -8,6 +8,8 @@
 - `lab report EVAL_ID`: print an eval run's report again
 - `lab replay RUN_ID`: re-run a recorded run from its recordings (no network) and check it matches
 - `lab fidelity`: replay recent runs and report how many reproduce exactly
+- `lab fork RUN_ID --step N --prompt …`: rerun from a step with one change, N times, vs a control
+- `lab worker`: run fork jobs queued from the UI, with this repo's agent code
 - `lab ui`: serve the web UI and its API
 - `lab models`: list the Gemini models your API key can use
 """
@@ -15,6 +17,7 @@
 import argparse
 import sys
 from datetime import UTC
+from pathlib import Path
 
 from google.genai import errors
 
@@ -76,9 +79,36 @@ def main(argv: list[str] | None = None) -> int:
     fid = commands.add_parser("fidelity", help="replay recent demo-agent runs and score them")
     fid.add_argument("--limit", type=int, default=20)
 
+    fk = commands.add_parser("fork", help="rerun a run from a step with one change, N times")
+    fk.add_argument("run_id", help="a run ID, or the start of one")
+    where = fk.add_mutually_exclusive_group(required=True)
+    where.add_argument(
+        "--step",
+        type=int,
+        help="fork at this step (the model decides it again); for agents with their own loop, "
+        "the N-th model call",
+    )
+    where.add_argument("--tool", help="fork at this tool's first call (change its output)")
+    where.add_argument("--span", help="fork at this span ID")
+    fk.add_argument("--prompt", help="replace the system prompt from the fork point on")
+    fk.add_argument("--append-prompt", help="add this to the end of the recorded system prompt")
+    fk.add_argument("--model", help="flash, flash-lite, or a model ID, for the live part")
+    fk.add_argument("--tool-output", help="JSON that replaces the forked tool call's result")
+    fk.add_argument("-n", type=int, default=5, help="runs with the change (and without it)")
+    fk.add_argument("--no-control", action="store_true", help="skip the N runs without the change")
+    fk.add_argument("--no-judge", action="store_true", help="skip LLM-judge checks when scoring")
+    fk.add_argument("--entry", help="for your own agent: FILE.py:FUNCTION or MODULE:FUNCTION")
+
+    wk = commands.add_parser("worker", help="run fork jobs queued in the lab, with this code")
+    wk.add_argument("--server", help="a lab server URL; default: the local database")
+    wk.add_argument("--entry", help="your agent's @lab.agent function, FILE.py:FUNCTION")
+    wk.add_argument("--once", action="store_true", help="run at most one job, then exit")
+    wk.add_argument("--no-judge", action="store_true")
+
     ui = commands.add_parser("ui", help="serve the web UI and its API")
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8000)
+    ui.add_argument("--no-worker", action="store_true", help="don't run fork jobs in-process")
 
     commands.add_parser("models", help="list the Gemini Flash models your API key can use")
 
@@ -95,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "report":
         return _report(Store(settings.db_path), args.eval_id)
     if args.command == "ui":
-        return _ui(Store(settings.db_path), args.host, args.port)
+        return _ui(settings, agents, args.host, args.port, worker=not args.no_worker)
     # Replays never call Gemini, so they need no API key either.
     if args.command == "replay":
         return _replay(settings, agents, args.run_id, args.entry)
@@ -115,6 +145,10 @@ def main(argv: list[str] | None = None) -> int:
         return _models(llm, settings)
     if args.command == "eval":
         return _eval(llm, settings, agents, args)
+    if args.command == "fork":
+        return _fork(llm, settings, agents, args)
+    if args.command == "worker":
+        return _worker(llm, settings, agents, args)
     return _run(llm, settings, agents[args.agent], args)
 
 
@@ -288,14 +322,175 @@ def _report(store: Store, eval_id: str) -> int:
     return 0
 
 
-def _ui(store: Store, host: str, port: int) -> int:
+def _ui(settings: Settings, agents: dict[str, Agent], host: str, port: int, worker: bool) -> int:
+    import threading
+
     import uvicorn
 
     from agentlab.server import create_app
 
+    store = tracing.init(settings.db_path)
+    stop = threading.Event()
+    if worker and settings.gemini_api_key:
+        # Fork jobs queued from the UI run in this process, for the demo agents. Customer agents
+        # need `lab worker --entry …` in their own repo.
+        from agentlab.fork.worker import work
+
+        llm = GeminiClient(
+            settings.gemini_api_key, requests_per_minute=settings.requests_per_minute or None
+        )
+        threading.Thread(
+            target=work,
+            kwargs=dict(_fork_context(llm, settings, agents, judge=True), store=store, stop=stop),
+            daemon=True,
+        ).start()
+        print("fork worker running for the demo agents")
+    elif worker:
+        print("No GEMINI_API_KEY: forks will wait in the queue until a `lab worker` runs them")
     print(f"Agent Reliability Lab UI on http://{host}:{port}")
-    uvicorn.run(create_app(store), host=host, port=port, log_level="warning")
+    try:
+        uvicorn.run(create_app(store), host=host, port=port, log_level="warning")
+    finally:
+        stop.set()
     return 0
+
+
+def _fork_context(
+    llm: GeminiClient, settings: Settings, agents: dict[str, Agent], *, judge: bool, entry=None
+) -> dict:
+    """What a fork needs besides the store: the model client, agents, judge and eval tasks."""
+    from agentlab.evals import LLMJudge
+    from agentlab.evals.tasks import load_tasks
+
+    return {
+        "llm": llm,
+        "agents": None if entry else agents,
+        "entry": entry,
+        "judge": LLMJudge(llm, settings.flash_lite_model) if judge else None,
+        "tasks": load_tasks(settings.datasets_dir) if Path(settings.datasets_dir).is_dir() else {},
+    }
+
+
+def _fork(
+    llm: GeminiClient, settings: Settings, agents: dict[str, Agent], args: argparse.Namespace
+) -> int:
+    import json
+
+    from agentlab.fork.point import resolve_fork_point
+    from agentlab.fork.runner import execute_fork
+    from agentlab.replay.runner import load_entry
+    from agentlab.replay.session import Override
+
+    store = tracing.init(settings.db_path)
+    try:
+        source = store.find_run(args.run_id)
+        span_id = args.span or _find_span(store, source.id, step=args.step, tool=args.tool)
+        point = resolve_fork_point(store, source.id, span_id)
+    except (LookupError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+
+    prompt = args.prompt
+    if args.append_prompt:
+        prompt = (_recorded_prompt(store, source.id) or "") + "\n" + args.append_prompt
+    model = settings.model_for(args.model) if args.model in TIERS else args.model
+    override = Override(
+        system_prompt=prompt,
+        model=model,
+        tool_output=json.loads(args.tool_output) if args.tool_output else None,
+    )
+    fork_id = store.create_fork(
+        source_run_id=source.id,
+        span_id=point.span_id,
+        label=point.label,
+        override=override.model_dump(exclude_none=True),
+        n=args.n,
+        control=not args.no_control,
+        status="running",
+        worker="cli",
+    )
+    entry = load_entry(args.entry) if args.entry else None
+    context = _fork_context(llm, settings, agents, judge=not args.no_judge, entry=entry)
+    plan = f"{args.n} with the change" + ("" if args.no_control else f", {args.n} without")
+    print(f"forking {source.id[:8]} at {point.label}: {plan} …\n")
+
+    def progress(role: str, result: dict) -> None:
+        if result["passed"] is None:
+            mark = result["status"]
+        else:
+            mark = "✓" if result["passed"] else f"✗ {result['category']}"
+        print(f"  {role:7} {result['run_id'][:8]}  {mark:22} {(result['answer'] or '')[:70]!r}")
+
+    try:
+        summary = execute_fork(store, store.get_fork(fork_id), on_run=progress, **context)
+    except Exception as e:
+        store.finish_fork(fork_id, error=f"{type(e).__name__}: {e}")
+        raise
+    store.finish_fork(fork_id, summary=summary)
+    print(f"\nfork {fork_id[:8]}")
+    for role in ("fork", "control"):
+        group = summary[role]
+        if group and group["passed"] is not None:
+            print(
+                f"  {'with the change' if role == 'fork' else 'without (control)':18} "
+                f"{group['passed']}/{group['n']} pass"
+            )
+    if summary["p_value"] is not None:
+        print(f"  p = {summary['p_value']:.4f} (Fisher's exact test)")
+    print(f"  {summary['verdict']}")
+    return 0
+
+
+def _worker(
+    llm: GeminiClient, settings: Settings, agents: dict[str, Agent], args: argparse.Namespace
+) -> int:
+    from agentlab.fork.worker import work
+    from agentlab.replay.runner import load_entry
+
+    store = tracing.init(args.server or settings.db_path)
+    entry = load_entry(args.entry) if args.entry else None
+    if entry is not None:
+        tracing.init(store)  # the entry module may have called lab.init with its own target
+    where = args.server or settings.db_path
+    names = entry.agent_name if entry else ", ".join(sorted(agents))
+    print(f"worker for {names}, taking fork jobs from {where} (Ctrl-C to stop)")
+    try:
+        work(
+            store,
+            once=args.once,
+            **_fork_context(llm, settings, agents, judge=not args.no_judge, entry=entry),
+        )
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def _find_span(store: Store, run_id: str, *, step: int | None, tool: str | None) -> str:
+    spans = store.spans(run_id)
+    for s in spans:
+        if (
+            step is not None
+            and s.kind == "step"
+            and s.attributes.get("agentlab.step.index") == step
+        ):
+            return s.id
+        if tool and s.kind == "tool" and s.attributes.get("gen_ai.tool.name") == tool:
+            return s.id
+    # An agent with its own loop has no step spans: then step N means its N-th model call.
+    model_calls = [s for s in spans if s.kind == "llm"]
+    has_steps = any(s.kind == "step" for s in spans)
+    if step is not None and not has_steps and 0 < step <= len(model_calls):
+        return model_calls[step - 1].id
+    raise LookupError(f"Run {run_id[:8]} has no " + (f"step {step}" if step else f"call to {tool}"))
+
+
+def _recorded_prompt(store: Store, run_id: str) -> str | None:
+    """The system prompt the run's first model call was sent."""
+    for r in store.run_recordings(run_id):
+        if r.kind == "llm":
+            instruction = (r.request.get("config") or {}).get("system_instruction")
+            return instruction if isinstance(instruction, str) else None
+    return None
 
 
 def _models(llm: GeminiClient, settings: Settings) -> int:

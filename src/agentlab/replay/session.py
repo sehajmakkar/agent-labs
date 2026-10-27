@@ -11,6 +11,10 @@ Recordings with the same hash are served in the order they were made, so a call 
 
 If the agent asks for something that was never recorded, its code or inputs have changed since the
 recording. The session raises `ReplayDivergence`, naming what differs from the request it expected.
+
+`ForkSession` is the counterfactual version: it serves the recording *up to a chosen point*, by
+position rather than hash (an override such as a new prompt changes the requests on purpose), then
+returns `LIVE` so the boundaries make real calls from there on, with the override applied.
 """
 
 from collections import defaultdict, deque
@@ -20,10 +24,20 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentlab.store import RecordingRow
 
+# Returned by `take()` when a call should go out for real: in a fork, after the fork point.
+LIVE = object()
 
-class ReplayDivergence(Exception):
+
+class InterceptorStop(Exception):
+    """Stops a replay or fork. Not an error of the tool or model, so the loop must not hand it to
+    the model as a tool error."""
+
+
+class ReplayDivergence(InterceptorStop):
     """The replayed agent made a call that isn't in the recording."""
 
     def __init__(self, kind: str, request: Any, expected: Any | None):
@@ -39,12 +53,29 @@ class ReplayDivergence(Exception):
         super().__init__(what + detail)
 
 
+class ForkBlocked(InterceptorStop):
+    """A fork reached a write tool that has no simulator. Running it for real could move money or
+    send email, so the fork stops instead."""
+
+
+class Override(BaseModel):
+    """What a fork changes. Empty means a control: the same point, no change."""
+
+    system_prompt: str | None = None  # replaces the system instruction of every live model call
+    model: str | None = None  # model ID for every live model call
+    tool_output: Any = None  # replaces the result of the forked tool call (tool forks only)
+
+    def is_empty(self) -> bool:
+        return self.system_prompt is None and self.model is None and self.tool_output is None
+
+
 @dataclass
 class _Recorded:
     kind: str
     request_hash: str
     request: Any
     response: Any
+    seq: int | None = None
     used: bool = False
 
 
@@ -62,7 +93,7 @@ class ReplaySession:
     def from_rows(
         cls, source_run_id: str, rows: list[RecordingRow], replay_run_id: str | None = None
     ) -> "ReplaySession":
-        recordings = [_Recorded(r.kind, r.request_hash, r.request, r.response) for r in rows]
+        recordings = [_Recorded(r.kind, r.request_hash, r.request, r.response, r.seq) for r in rows]
         queues: dict[tuple[str, str], deque[_Recorded]] = defaultdict(deque)
         for r in recordings:
             queues[(r.kind, r.request_hash)].append(r)
@@ -84,6 +115,100 @@ class ReplaySession:
     def unused(self) -> list[_Recorded]:
         """Recordings the replay never asked for: the replay did less than the original."""
         return [r for r in self.recordings if not r.used]
+
+    def run_fields(self) -> dict[str, Any]:
+        """Columns for the run this session produces."""
+        return {"mode": "replay", "parent_run_id": self.source_run_id}
+
+
+@dataclass
+class ForkSession(ReplaySession):
+    """Replay up to `live_from_seq`, then go live with `override` applied."""
+
+    live_from_seq: float = float("inf")
+    override: Override = field(default_factory=Override)
+    fork_id: str | None = None
+    fork_span_id: str | None = None
+    tool_override_seq: int | None = None  # the recorded tool call whose result is replaced
+    live: bool = False
+    _prefix: dict[tuple, deque[_Recorded]] = field(default_factory=dict)
+    _last_clock: dict[str, float] = field(default_factory=dict)
+    _clock_offset: dict[str, float] = field(default_factory=dict)
+
+    @classmethod
+    def for_fork(
+        cls,
+        source_run_id: str,
+        rows: list[RecordingRow],
+        *,
+        live_from_seq: float,
+        override: Override,
+        run_id: str,
+        fork_id: str | None = None,
+        fork_span_id: str | None = None,
+        tool_override_seq: int | None = None,
+    ) -> "ForkSession":
+        session = cls(
+            source_run_id,
+            [_Recorded(r.kind, r.request_hash, r.request, r.response, r.seq) for r in rows],
+            replay_run_id=run_id,
+            live_from_seq=live_from_seq,
+            override=override,
+            fork_id=fork_id,
+            fork_span_id=fork_span_id,
+            tool_override_seq=tool_override_seq,
+        )
+        prefix: dict[tuple, deque[_Recorded]] = defaultdict(deque)
+        for r in session.recordings:
+            if r.seq is not None and r.seq < live_from_seq:
+                prefix[_prefix_key(r.kind, r.request_hash)].append(r)
+        session._prefix = prefix
+        return session
+
+    def take(self, kind: str, request: Any, request_hash: str) -> Any:
+        """Before the fork point: the next recorded call of this kind, in order. After: LIVE."""
+        queue = None if self.live else self._prefix.get(_prefix_key(kind, request_hash))
+        if not queue:
+            if kind == "llm":
+                self.live = True  # the first live model call: from here on, everything is live
+            return LIVE
+        recorded = queue.popleft()
+        recorded.used = True
+        if kind == "tool" and recorded.request.get("tool") != request.get("tool"):
+            raise ReplayDivergence(kind, request, recorded.request)
+        if kind == "clock":
+            self._last_clock[request["source"]] = recorded.response["value"]
+        if kind == "tool" and recorded.seq == self.tool_override_seq:
+            return {"output": self.override.tool_output}
+        return recorded.response
+
+    def continue_clock(self, source: str, live_value: float) -> float:
+        """A live clock read, shifted to continue the recorded timeline.
+
+        Monotonic clocks from two processes are unrelated numbers, so mixing a recorded deadline
+        with a fresh reading would time out at once, or never. The first live read is pinned to
+        the last recorded one, and later reads move forward from there.
+        """
+        if source not in self._last_clock:
+            return live_value
+        if source not in self._clock_offset:
+            self._clock_offset[source] = self._last_clock[source] - live_value
+        return live_value + self._clock_offset[source]
+
+    def run_fields(self) -> dict[str, Any]:
+        return {
+            "mode": "fork",
+            "parent_run_id": self.source_run_id,
+            "fork_id": self.fork_id,
+            "fork_span_id": self.fork_span_id,
+            "fork_override": None if self.override.is_empty() else self.override.model_dump(),
+        }
+
+
+def _prefix_key(kind: str, request_hash: str) -> tuple:
+    # Model and tool calls are matched by position: an override changes their requests on purpose.
+    # Clock and random reads are matched by source ("time", "monotonic", "random"), via the hash.
+    return (kind, request_hash) if kind in ("clock", "random") else (kind,)
 
 
 _session: ContextVar[ReplaySession | None] = ContextVar("agentlab_replay", default=None)

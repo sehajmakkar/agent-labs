@@ -9,6 +9,9 @@
   result** pointing to the run it produced.
 - A **replay** is a run re-executed from another run's recordings (`mode="replay"`,
   `parent_run_id` = the source). Its `replay_report` says whether it reproduced the source exactly.
+- A **fork** is a job: "rerun this run from that span, with this change, N times". It is queued
+  here, claimed by a worker, and produces N fork runs (and N control runs without the change),
+  each with `mode="fork"` and `fork_id` pointing back to it.
 
 `fork_span_id` and `fork_override` stay empty until Phase 4.
 
@@ -22,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import JSON, Column, event, func
+from sqlalchemy import JSON, Column, event, func, update
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from agentlab.semconv import RATE_LIMIT_WAIT_S
@@ -41,8 +44,9 @@ class RunRow(SQLModel, table=True):
     error: str | None = None
     started_at: datetime
     ended_at: datetime | None = None
-    mode: str | None = None  # record (or None, for runs before Phase 3) | replay
+    mode: str | None = None  # record (or None, for runs before Phase 3) | replay | fork
     parent_run_id: str | None = Field(default=None, index=True)
+    fork_id: str | None = Field(default=None, index=True)  # the fork job this run belongs to
     fork_span_id: str | None = None
     fork_override: Any = Field(default=None, sa_column=Column(JSON))
     replay_report: Any = Field(default=None, sa_column=Column(JSON))
@@ -110,6 +114,25 @@ class EvalResultRow(SQLModel, table=True):
     judge_cost_usd: float | None = None
 
 
+class ForkRow(SQLModel, table=True):
+    __tablename__ = "forks"
+
+    id: str = Field(primary_key=True)
+    source_run_id: str = Field(index=True)
+    span_id: str  # where the fork starts: a step or a tool call of the source run
+    label: str = ""  # e.g. "step 3" or "get_alert in step 1", for display
+    override: Any = Field(default=None, sa_column=Column(JSON))
+    n: int = 5
+    control: bool = True  # also run N times with no change, to compare against
+    status: str = "queued"  # queued | running | done | error
+    worker: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    summary: Any = Field(default=None, sa_column=Column(JSON))
+    error: str | None = None
+
+
 @dataclass
 class RunTotals:
     """Per-run sums over its model calls."""
@@ -143,6 +166,9 @@ class Store:
         run_id: str | None = None,
         mode: str = "record",
         parent_run_id: str | None = None,
+        fork_id: str | None = None,
+        fork_span_id: str | None = None,
+        fork_override: Any = None,
     ) -> str:
         run = RunRow(
             id=run_id or uuid.uuid4().hex,
@@ -153,6 +179,9 @@ class Store:
             started_at=datetime.now(UTC),
             mode=mode,
             parent_run_id=parent_run_id,
+            fork_id=fork_id,
+            fork_span_id=fork_span_id,
+            fork_override=fork_override,
         )
         with Session(self.engine) as session:
             session.add(run)
@@ -303,6 +332,93 @@ class Store:
                 .order_by(EvalResultRow.id)
             )
             return list(session.exec(query))
+
+    # Forks (the job queue)
+
+    def create_fork(
+        self,
+        *,
+        source_run_id: str,
+        span_id: str,
+        label: str,
+        override: Any,
+        n: int,
+        control: bool,
+        status: str = "queued",
+        worker: str | None = None,
+    ) -> str:
+        """Queue a fork job. Pass status="running" to run it yourself (`lab fork`) instead."""
+        now = datetime.now(UTC)
+        row = ForkRow(
+            id=uuid.uuid4().hex,
+            source_run_id=source_run_id,
+            span_id=span_id,
+            label=label,
+            override=override,
+            n=n,
+            control=control,
+            status=status,
+            worker=worker,
+            created_at=now,
+            started_at=now if status == "running" else None,
+        )
+        with Session(self.engine) as session:
+            session.add(row)
+            session.commit()
+            return row.id
+
+    def get_fork(self, fork_id: str) -> ForkRow | None:
+        with Session(self.engine) as session:
+            return session.get(ForkRow, fork_id)
+
+    def find_fork(self, id_prefix: str) -> ForkRow:
+        return _find_by_prefix(self.engine, ForkRow, id_prefix, "fork")
+
+    def forks_of(self, run_id: str) -> list[ForkRow]:
+        with Session(self.engine) as session:
+            query = (
+                select(ForkRow)
+                .where(ForkRow.source_run_id == run_id)
+                .order_by(ForkRow.created_at.desc())
+            )
+            return list(session.exec(query))
+
+    def fork_runs(self, fork_id: str) -> list[RunRow]:
+        with Session(self.engine) as session:
+            query = select(RunRow).where(RunRow.fork_id == fork_id).order_by(RunRow.started_at)
+            return list(session.exec(query))
+
+    def claim_fork(self, agent_names: list[str], worker: str) -> ForkRow | None:
+        """Take the oldest queued fork whose agent this worker can run, or None.
+
+        Two workers may poll at once, so the claim is a compare-and-set: the UPDATE only succeeds
+        while the row is still "queued", and whoever changes it first owns the job.
+        """
+        with Session(self.engine) as session:
+            candidates = session.exec(
+                select(ForkRow.id)
+                .join(RunRow, RunRow.id == ForkRow.source_run_id)
+                .where(ForkRow.status == "queued", RunRow.agent_name.in_(agent_names))
+                .order_by(ForkRow.created_at)
+            ).all()
+            for fork_id in candidates:
+                claimed = session.execute(
+                    update(ForkRow)
+                    .where(ForkRow.id == fork_id, ForkRow.status == "queued")
+                    .values(status="running", worker=worker, started_at=datetime.now(UTC))
+                )
+                session.commit()
+                if claimed.rowcount == 1:
+                    return session.get(ForkRow, fork_id)
+        return None
+
+    def finish_fork(self, fork_id: str, *, summary: Any = None, error: str | None = None) -> None:
+        with Session(self.engine) as session:
+            row = session.get(ForkRow, fork_id)
+            row.status = "error" if error else "done"
+            row.summary, row.error, row.finished_at = summary, error, datetime.now(UTC)
+            session.add(row)
+            session.commit()
 
     def eval_results_for_runs(self, run_ids: list[str]) -> dict[str, EvalResultRow]:
         """The eval result of each run that was scored, keyed by run ID."""

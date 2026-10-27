@@ -5,7 +5,8 @@ covers what has been built, how a run and an eval flow through the code, how too
 and what to show in an interview.
 
 Claude updates this file at the end of every phase: new files go into the reading order, and each
-phase gets a short recap. Last updated: **Phase 3 (2026-10-27)**.
+phase gets a short recap. Last updated: **Phase 4 (2026-10-27)**. For the same project told
+as a story, read [STORY.md](STORY.md).
 
 ---
 
@@ -21,8 +22,9 @@ scores the agents automatically, and a web UI shows any run as a clickable decis
 | 1 | Tracing: every run saved to SQLite as a tree of spans, with the exact request and response of every call; tokens, cost, latency, retries, timeouts | `uv run lab runs`, then `uv run lab show <id>` |
 | 2 | Evals (datasets, checks, LLM judge, failure categories, metrics), the triage agent, a rate limiter, the FastAPI server and the React UI | `uv run lab eval datasets/*.jsonl`, then `uv run lab ui` |
 | 3 | Deterministic replay: any recorded run re-executed offline with every call served from its recordings, and checked span by span; a refund write tool on a per-run simulated backend | `env -u GEMINI_API_KEY uv run lab replay <run-id>`, `uv run lab fidelity` |
+| 4 | Fork & Replay: rerun from any step with a changed prompt, model or tool result, N times next to N controls, scored and compared with Fisher's exact test; fork jobs run by workers, locally or over HTTP | `uv run lab fork <run> --step 3 --append-prompt "…"`, or "⑂ Fork from here" in the UI |
 
-**Not built yet:** fork, diff and blame (Phases 4 to 6). All three are built on replay.
+**Not built yet:** Trajectory Diff (Phase 5) and Auto-Blame (Phase 6). Both are built on fork.
 
 The lab has **two halves**, and the split matters in interviews:
 
@@ -117,7 +119,32 @@ replay_run(store, source_run_id)
         → FidelityReport (identical? differences) → saved on the replay run
 ```
 
-### 2d. The UI
+### 2d. One fork
+
+Here is what `lab fork 710849a3 --step 3 --append-prompt "…" -n 5` does, or the UI's "⑂ Fork
+from here" followed by a worker.
+
+```
+create_fork(...)                         a row in `forks` (the job)            store.py
+execute_fork(store, fork)                                                     fork/runner.py
+ ├─ resolve_fork_point(run, span)        step 3 → live from its model call's seq  fork/point.py
+ ├─ for role in (fork: override, control: no override), N times each:
+ │    ForkSession.for_fork(recordings, live_from_seq, override)              replay/session.py
+ │    run_in_session(…)                  the SAME loop again (section 2a), but at the boundaries:
+ │      before the fork point: session.take() → the next recorded reply, by position
+ │           (a write tool's recorded call is also re-applied to its simulator: event sourcing)
+ │      at/after it:           LIVE → Gemini is called for real, with the override swapped in
+ │           (a live write tool runs only via its simulator, otherwise ForkBlocked)
+ │    score(task, Trajectory)             the source's eval task scores each run
+ └─ summary: fork k/N vs control j/N → fisher_exact → verdict                fork/stats.py
+```
+
+From the UI, `POST /api/forks` only queues the row. A worker (inside `lab ui` for the demo agents,
+or `lab worker --entry app.py:agent` in your repo) claims it with a compare-and-set UPDATE and runs
+the same `execute_fork`. With `--server URL`, the worker's store is a `RemoteStore`: every store
+call becomes a POST to `/api/store/<method>`.
+
+### 2e. The UI
 
 `uv run lab ui` starts FastAPI (`server.py`), which serves `ui/dist` and the `/api/*` endpoints.
 The Replay button calls `POST /api/runs/<id>/replay`, which runs section 2c and opens the new run.
@@ -135,8 +162,8 @@ browser  #/evals/<id>       → GET /api/evals/<id>             → eval run + r
 ## 3. Reading order
 
 ★★★ means it's core: know it well enough to explain without looking. ★★ means understand what it
-does and why. ★ means skim. The times are for a careful first read. **New or changed in Phase 3**
-is marked 🆕 (Phase 2 additions are no longer marked).
+does and why. ★ means skim. The times are for a careful first read. **New or changed in Phase 4**
+is marked 🆕 (earlier additions are no longer marked).
 
 ### Step 0: orient (10 min)
 
@@ -147,7 +174,7 @@ is marked 🆕 (Phase 2 additions are no longer marked).
 
 ### Step 1: the agent from the outside
 
-4. 🆕 **[src/agentlab/demo/support.py](src/agentlab/demo/support.py)** ★★ (172 lines, 10 min)
+4. **[src/agentlab/demo/support.py](src/agentlab/demo/support.py)** ★★ (172 lines, 10 min)
    This is what a *user* of the lab writes: fake data, four functions marked `@tool` (three
    `read`, one `write`: `refund_payment`), a system prompt with a refund policy, and an
    `Agent(...)`. Don't worry about how `@tool` works yet; Section 4 covers it. The docstrings are
@@ -170,7 +197,7 @@ is marked 🆕 (Phase 2 additions are no longer marked).
 
 ### Step 3: the heart
 
-6. 🆕 **[src/agentlab/loop.py](src/agentlab/loop.py)** ★★★ (154 lines, 20 min). **This is the most
+6. **[src/agentlab/loop.py](src/agentlab/loop.py)** ★★★ (154 lines, 20 min). **This is the most
    important file.**
    An agent is this loop: send the conversation to the model, run any tools it asks for, append the
    results, and repeat until it answers in plain text. On this first read, treat `span(...)` and
@@ -182,12 +209,12 @@ is marked 🆕 (Phase 2 additions are no longer marked).
      crashes the loop (D-013), except a `ReplayDivergence`, which is not the tool's error.
    - `run_agent(task_id=…, run_id=…)`: the eval runner chooses the run's ID up front, so it can
      score a run even if it crashes.
-   - 🆕 The default `clock` is `determinism.monotonic`, so timeouts replay. The run's limits are
+   - The default `clock` is `determinism.monotonic`, so timeouts replay. The run's limits are
      stored on the root span, so a replay uses the same ones.
 
 ### Step 4: tools
 
-7. 🆕 **[src/agentlab/tools.py](src/agentlab/tools.py)** ★★★ (128 lines, 20 min)
+7. **[src/agentlab/tools.py](src/agentlab/tools.py)** ★★★ (128 lines, 20 min)
    Read [Section 4](#4-how-tool-calling-works) first, then this file.
    - `tool()` / `decorate()`: turn a function into a `Tool` object.
    - `_args_model`: type hints → a pydantic model → a JSON Schema.
@@ -220,11 +247,11 @@ is marked 🆕 (Phase 2 additions are no longer marked).
 ### Step 7: tracing (the "lab" half)
 
 13. **[src/agentlab/semconv.py](src/agentlab/semconv.py)** ★ (3 min): attribute names.
-14. 🆕 **[src/agentlab/store.py](src/agentlab/store.py)** ★★ (362 lines, 15 min): five tables.
-    - `runs`, `spans` and `recordings` came in Phase 1. 🆕 Runs gained `mode` and
+14. **[src/agentlab/store.py](src/agentlab/store.py)** ★★ (362 lines, 15 min): five tables.
+    - `runs`, `spans` and `recordings` came in Phase 1. Runs gained `mode` and
       `replay_report`; recordings gained `seq`, their call order.
     - `eval_runs` and `eval_results`.
-    - 🆕 `_add_missing_columns`: the additive migration (D-031). `run_recordings`: every recording
+    - `_add_missing_columns`: the additive migration (D-031). `run_recordings`: every recording
       of a run, in call order.
     - WAL mode and `check_same_thread=False`, so threads can write while the UI reads.
     - `run_totals` sums tokens and cost per run in one `GROUP BY` query.
@@ -233,16 +260,16 @@ is marked 🆕 (Phase 2 additions are no longer marked).
     most important file.** Read [Section 5](#5-tracing-in-five-minutes) first.
     - `span()` (lines 111–136): open a span, make it current, save it on exit.
     - `agent_run()`: also creates the run row and records rate-limit waiting on the root span.
-      🆕 Inside a replay it marks the new run `mode="replay"` with the source as its parent
+      Inside a replay it marks the new run `mode="replay"` with the source as its parent
       (lines 165–172).
-    - `Span.record()` (🆕 now takes the call order from the run's counter), `@agent`,
+    - `Span.record()` (now takes the call order from the run's counter), `@agent`,
       `note_wait()`, `current_span()`.
 
 ### Step 8: close the loop
 
 16. **[src/agentlab/llm/gemini.py](src/agentlab/llm/gemini.py)**, **lines 165–264** ★★★ (10 min).
     `TracedGenAIClient` is the **model-call boundary**: a stand-in for `genai.Client` that turns
-    each `generate_content` into a recorded `chat` span. 🆕 It records failures too
+    each `generate_content` into a recorded `chat` span. It records failures too
     (`_error_json`). Skip the `if session:` branch until Step 9.
 17. **Re-read `Tool.invoke`** in [tools.py](src/agentlab/tools.py). It is the **tool-call
     boundary**, and it works the same way.
@@ -251,7 +278,7 @@ is marked 🆕 (Phase 2 additions are no longer marked).
     else's agent, with its own loop over raw `google-genai`, traced by lines 1, 2 and 3 only. This
     is the integration story in one file.
 
-### Step 9: replay 🆕
+### Step 9: replay
 
 Read these in order. Each uses the ones before it, and all of them rely on Steps 7–8.
 
@@ -274,75 +301,113 @@ Read these in order. Each uses the ones before it, and all of them rely on Steps
     `replay_run` ties it together for a demo agent (with an `_Offline` client that raises if
     called) or a customer entry point (`load_entry`). Trace it against Section 2c.
 
-### Step 10: the demo agents and the CLI
+### Step 10: fork 🆕
 
-25. **[src/agentlab/demo/triage.py](src/agentlab/demo/triage.py)** ★★ (212 lines, 10 min): an
+Read these in order, after Step 9: a fork is a replay that goes live part-way.
+
+25. 🆕 **[src/agentlab/replay/session.py](src/agentlab/replay/session.py)**, from `class ForkSession`
+   (line 125) ★★★ (15 min): the prefix queues (by position, `_prefix_key`), `take()` returning
+   `LIVE`, `continue_clock`, `run_fields`, and `Override`, `InterceptorStop` and `ForkBlocked` near
+   the top.
+26. **The fork branches at the boundaries:**
+   - [gemini.py](src/agentlab/llm/gemini.py) line 197 and `_apply_override` (line 250): the
+     prompt or model is swapped on live calls only.
+   - [tools.py](src/agentlab/tools.py) `_fork_fn` (line 55), the live branch in `invoke`
+     (lines 84–95) and `_reapply` (line 123): the write policy and event sourcing.
+27. **[src/agentlab/fork/point.py](src/agentlab/fork/point.py)** ★★ (92 lines, 10 min): step, tool
+   or model call → `live_from_seq`.
+28. **[src/agentlab/fork/stats.py](src/agentlab/fork/stats.py)** ★★★ (41 lines, 10 min): Fisher's
+   exact test in 15 lines, and the verdict rules.
+29. **[src/agentlab/fork/runner.py](src/agentlab/fork/runner.py)** ★★★ (151 lines, 15 min):
+   `execute_fork` (N forks and N controls, scoring, summary). Trace it against Section 2d. It
+   reuses `run_in_session` from [replay/runner.py](src/agentlab/replay/runner.py).
+30. **[src/agentlab/fork/worker.py](src/agentlab/fork/worker.py)** ★★ (77 lines, 5 min): the
+   claim → run → finish loop; then `claim_fork` in [store.py](src/agentlab/store.py) (the
+   compare-and-set).
+31. **[src/agentlab/remote.py](src/agentlab/remote.py)** ★★ (77 lines, 10 min): the store over
+   HTTP; then `_rpc_handlers` in [server.py](src/agentlab/server.py).
+
+### Step 11: the demo agents and the CLI
+
+32. **[src/agentlab/demo/triage.py](src/agentlab/demo/triage.py)** ★★ (212 lines, 10 min): an
     on-call assistant over simulated alerts, metrics, logs and deploys. Read the top docstring for
     each incident's real cause and its distraction.
-26. **[src/agentlab/render.py](src/agentlab/render.py)** ★ (5 min): the terminal tree, and
+33. **[src/agentlab/render.py](src/agentlab/render.py)** ★ (5 min): the terminal tree, and
     `render_eval` for the report.
-27. 🆕 **[src/agentlab/cli.py](src/agentlab/cli.py)** ★★ (324 lines, 10 min): `run`, `runs`, `show`,
-    `eval`, `evals`, `report`, `ui`, and 🆕 `replay` and `fidelity`.
+34. 🆕 **[src/agentlab/cli.py](src/agentlab/cli.py)** ★★ (519 lines, 15 min): `run`, `runs`, `show`,
+    `eval`, `evals`, `report`, `ui`, `replay`, `fidelity`, and 🆕 `fork` and `worker`.
 
-### Step 11: evals
+### Step 12: evals
 
 Read these in this order; each one uses the ones before it.
 
-28. **[datasets/support.jsonl](datasets/support.jsonl)** ★★ (5 min): look at two or three tasks:
+35. **[datasets/support.jsonl](datasets/support.jsonl)** ★★ (5 min): look at two or three tasks:
     input, expected outcome, checks.
-29. **[src/agentlab/evals/categories.py](src/agentlab/evals/categories.py)** ★★ (49 lines, 5 min):
+36. **[src/agentlab/evals/categories.py](src/agentlab/evals/categories.py)** ★★ (49 lines, 5 min):
     the failure categories and `pick_category`.
-30. **[src/agentlab/evals/trajectory.py](src/agentlab/evals/trajectory.py)** ★★★ (79 lines,
+37. **[src/agentlab/evals/trajectory.py](src/agentlab/evals/trajectory.py)** ★★★ (79 lines,
     10 min): a stored run flattened for checks, and `transcript()` for the judge. Scoring from
     the *store* is why evals work on any agent (D-023).
-31. **[src/agentlab/evals/judge.py](src/agentlab/evals/judge.py)** ★★★ (80 lines, 10 min):
+38. **[src/agentlab/evals/judge.py](src/agentlab/evals/judge.py)** ★★★ (80 lines, 10 min):
     structured output with a pydantic `Verdict`, reasoning before verdict, and the judge prompt.
-32. **[src/agentlab/evals/tasks.py](src/agentlab/evals/tasks.py)** ★★★ (191 lines, 20 min): the
-    check classes, the discriminated union `Check`, `Task` and `load_dataset`.
-33. **[src/agentlab/evals/metrics.py](src/agentlab/evals/metrics.py)** ★★ (65 lines, 5 min):
+39. 🆕 **[src/agentlab/evals/tasks.py](src/agentlab/evals/tasks.py)** ★★★ (226 lines, 20 min): the
+    check classes (🆕 `Grounded`), the discriminated union `Check`, `Task`, `load_dataset` and
+    `load_tasks`.
+40. **[src/agentlab/evals/metrics.py](src/agentlab/evals/metrics.py)** ★★ (65 lines, 5 min):
     `percentile` and `summarize`.
-34. **[src/agentlab/evals/runner.py](src/agentlab/evals/runner.py)** ★★★ (119 lines, 15 min): the
+41. **[src/agentlab/evals/runner.py](src/agentlab/evals/runner.py)** ★★★ (119 lines, 15 min): the
     batch runner, which uses threads and scores and saves each task. Trace it against Section 2b.
 
-### Step 12: the server and the UI
+### Step 13: the server and the UI
 
-35. 🆕 **[src/agentlab/server.py](src/agentlab/server.py)** ★★ (241 lines, 10 min): the response
-    models, then the routes in `create_app`, 🆕 including `POST /api/runs/{id}/replay`. Open http://127.0.0.1:8000/docs while `lab ui` runs.
-36. **[ui/src/api.ts](ui/src/api.ts)** ★★ (5 min): the same shapes in TypeScript, plus fetchers.
-37. **[ui/src/lib/layout.ts](ui/src/lib/layout.ts)** ★★★ (50 lines, 10 min) and its test,
+42. 🆕 **[src/agentlab/server.py](src/agentlab/server.py)** ★★ (425 lines, 15 min): the response
+    models, then the routes in `create_app`: replay, 🆕 `POST /api/forks`, `GET /api/forks/{id}`,
+    `/family`, and the `/api/store/{method}` RPC. Open http://127.0.0.1:8000/docs while `lab ui` runs.
+43. **[ui/src/api.ts](ui/src/api.ts)** ★★ (5 min): the same shapes in TypeScript, plus fetchers.
+44. **[ui/src/lib/layout.ts](ui/src/lib/layout.ts)** ★★★ (50 lines, 10 min) and its test,
     [layout.test.ts](ui/src/lib/layout.test.ts): the tree layout.
-38. **[ui/src/lib/hooks.ts](ui/src/lib/hooks.ts)** ★ (5 min): the hash router and `useLoad`.
-39. **[ui/src/components/SpanNode.tsx](ui/src/components/SpanNode.tsx)** →
+45. **[ui/src/lib/hooks.ts](ui/src/lib/hooks.ts)** ★ (5 min): the hash router and `useLoad`.
+46. **[ui/src/components/SpanNode.tsx](ui/src/components/SpanNode.tsx)** →
     **[TraceTree.tsx](ui/src/components/TraceTree.tsx)** ★★★ (15 min): one node, then the whole
     tree with its red error path.
-40. **[ui/src/components/Inspector.tsx](ui/src/components/Inspector.tsx)** ★★ (10 min): rebuilds
+47. **[ui/src/components/Inspector.tsx](ui/src/components/Inspector.tsx)** ★★ (10 min): rebuilds
     the exact prompt from a recording.
-41. 🆕 **[ui/src/components/ReplayPanel.tsx](ui/src/components/ReplayPanel.tsx)** ★ (5 min): the
+48. **[ui/src/components/ReplayPanel.tsx](ui/src/components/ReplayPanel.tsx)** ★ (5 min): the
     Replay button, and a replay's fidelity report.
-42. **[ui/src/pages/](ui/src/pages/)** ★ (10 min): `Runs.tsx`, `RunView.tsx`, `Evals.tsx`; then
+49. 🆕 **[ui/src/components/ForkDialog.tsx](ui/src/components/ForkDialog.tsx)** ★★ (10 min): the
+    override editor, opened from the inspector. Then
+    **[ui/src/pages/ForkView.tsx](ui/src/pages/ForkView.tsx)** (polling, pass-rate cards) and
+    **[ui/src/components/FamilyTree.tsx](ui/src/components/FamilyTree.tsx)** (the run family).
+50. **[ui/src/pages/](ui/src/pages/)** ★ (10 min): `Runs.tsx`, `RunView.tsx`, `Evals.tsx`; then
     [App.tsx](ui/src/App.tsx) and [main.tsx](ui/src/main.tsx).
 
-### Step 13: tests (the specification)
+### Step 14: tests (the specification)
 
-43. **[tests/test_loop.py](tests/test_loop.py)** ★★★: `ScriptedLLM`, a fake model.
-44. 🆕 **[tests/test_replay.py](tests/test_replay.py)** ★★★: record with a fake Gemini, replay
+51. **[tests/test_loop.py](tests/test_loop.py)** ★★★: `ScriptedLLM`, a fake model.
+52. **[tests/test_replay.py](tests/test_replay.py)** ★★★: record with a fake Gemini, replay
     offline, compare. Also covers thought signatures byte for byte, retries, a changed prompt
     diverging, timeouts and an entry point.
-45. **[tests/test_evals.py](tests/test_evals.py)** ★★★: every check type, the judge with a fake
+53. 🆕 **[tests/test_fork.py](tests/test_fork.py)** ★★★: a fake Gemini that answers according to
+    the prompt (so a prompt fix really flips the outcome), prefix/live switching, every override,
+    simulators, `ForkBlocked`, a full job with controls, the atomic claim, and the worker. Then
+    **[tests/test_remote.py](tests/test_remote.py)**: the same over HTTP.
+54. **[tests/test_evals.py](tests/test_evals.py)** ★★★: every check type, the judge with a fake
     LLM, categories, percentiles, and the runner end to end.
-46. **[tests/test_server.py](tests/test_server.py)**, **[test_ratelimit.py](tests/test_ratelimit.py)**,
+55. **[tests/test_server.py](tests/test_server.py)**, **[test_ratelimit.py](tests/test_ratelimit.py)**,
     **[test_demo.py](tests/test_demo.py)** ★★. `test_demo` checks that every dataset task names a
     real agent and tool, with valid arguments.
-47. **[tests/test_tools.py](tests/test_tools.py)**, **[test_tracing.py](tests/test_tracing.py)**,
+56. **[tests/test_tools.py](tests/test_tools.py)**, **[test_tracing.py](tests/test_tracing.py)**,
     **[test_gemini.py](tests/test_gemini.py)**, **[test_render.py](tests/test_render.py)** ★★.
 
-### Step 14: the why
+### Step 15: the why
 
 These decisions.md entries come up in interviews: **D-004** (own loop), **D-008** (positioning),
 **D-009** (integration), **D-013** (tool errors as data), **D-015** (step spans), **D-016**
 (wrapping the SDK), **D-023** (evals score traces), **D-024** (the judge), **D-026** (rate
-limiting), 🆕 **D-030** (replay re-executes code), **D-033** (clock and randomness), **D-035**
-(tool results are snapshots). In [learnings.md](learnings.md), read the Phase 3 section.
+limiting), **D-030** (replay re-executes code), **D-033** (clock and randomness), **D-035**
+(tool results are snapshots), 🆕 **D-037** (fork by position, override at the boundary), **D-038**
+(event sourcing, the clock), **D-040** (controls and Fisher), **D-041/D-042** (workers and HTTP).
+In [learnings.md](learnings.md), read the Phase 4 section.
 
 ---
 
@@ -474,7 +539,8 @@ sqlite3 .agentlab/lab.db "select seq, kind, name, round(duration_ms) from spans 
 
 **Why record the exact request and hash it?** Replay (Phase 3) reruns the agent and, instead of
 calling Gemini or a tool, looks up the request's hash and returns the saved response (Section 2c).
-A fork (Phase 4) will be a replay that changes one thing at one step and goes live from there.
+A fork (Phase 4) is a replay that changes one thing at one step and goes live from there
+(Section 2d).
 
 **A fake LLM leaves no `chat` spans.** Those come from the wrapped Gemini client. A test's
 `ScriptedLLM` bypasses that client, so its runs show `agent → step → tool` only. That shows the
@@ -491,9 +557,13 @@ boundary is the SDK client, not our loop.
    checks at the top say why the task failed.
 4. Click the failing tool node: the error and the arguments the model wrote. Click the next
    model node: the exact prompt it saw, including that error.
-5. 🆕 Press **↺ Replay**. The same run re-executes offline in a fraction of a second: "Identical:
+5. Press **↺ Replay**. The same run re-executes offline in a fraction of a second: "Identical:
    all 15 spans match", $0. Then show a diverged replay (an old support run) and its first line,
    `$.config.system_instruction`: replay tells you *what changed*.
+6. 🆕 Open the failed `support-refund-request` run, click step 3, then **⑂ Fork from here**. Add
+   one sentence ("always give the refund ID"), and fork 5× with a control. The fork page: **5/5 vs
+   0/5, p = 0.008**. Then open the ALR-999 run's family tree and tell the three-fork story from
+   [STORY.md](STORY.md), Chapter 4.
 
 **Files to have open:** [loop.py](src/agentlab/loop.py), [tools.py](src/agentlab/tools.py),
 [tracing.py](src/agentlab/tracing.py), the wrapper in [gemini.py](src/agentlab/llm/gemini.py),
@@ -510,7 +580,10 @@ boundary is the SDK client, not our loop.
 > the path to the failure highlighted. Next: deterministic replay from the recordings, then fork,
 > diff and auto-blame. Replay is done now: any run re-executes offline with every model call, tool
 > call and clock read served from its recording, checked span by span, and it already found one
-> bug in my own code that looked like a hallucination."
+> bug in my own code that looked like a hallucination. Fork is done too: rerun from any step with
+> a changed prompt, model or tool result, N times against a control, scored by the task's checks
+> and compared with Fisher's exact test. The fork jobs run in the customer's repo through a worker,
+> because the lab never hosts their agent."
 
 **Questions you should be able to answer:**
 
@@ -526,11 +599,17 @@ boundary is the SDK client, not our loop.
 | What broke? | The free tier's 15 RPM failed half the first eval. We added a client-side limiter, honoured `RetryInfo`, and kept throttle time out of latency. | C-012, D-026 |
 | An interesting failure? | ALR-999: the tool said "no such alert", and the agent silently investigated a different alert. The answer looked expert; only the trace shows it. | learnings.md |
 | Why is the UI's tree layout your own? | A trace is a tree; 50 lines, unit-tested, no graph library needed. | D-028 |
-| 🆕 How does replay work? | Re-run the same code; each boundary looks up its request's hash in the recordings and returns the saved response. A miss is a divergence, reported with its JSON path. | D-030 |
-| 🆕 How do you stop a replay repeating a refund? | No tool function runs during replay, read or write: results and errors come from the recording. | C-002 |
-| 🆕 What about the clock, randomness, retries? | `lab.now()`/`lab.random()` are recorded; failed calls are recorded too; the loop's limits are stored on the run. | D-032, D-033 |
-| 🆕 How do you know a replay is faithful? | Compare decisions span by span (tree, tool args and results, model outputs, tokens, answer); `lab fidelity` reports the share identical. | fidelity.py |
-| 🆕 Best bug story? | A "hallucinated" refund claim was really a tool returning live state that a later write rewrote inside the conversation. The replay diverged at that exact field. Fix: snapshot tool results. | C-016 |
+| How does replay work? | Re-run the same code; each boundary looks up its request's hash in the recordings and returns the saved response. A miss is a divergence, reported with its JSON path. | D-030 |
+| How do you stop a replay repeating a refund? | No tool function runs during replay, read or write: results and errors come from the recording. | C-002 |
+| What about the clock, randomness, retries? | `lab.now()`/`lab.random()` are recorded; failed calls are recorded too; the loop's limits are stored on the run. | D-032, D-033 |
+| How do you know a replay is faithful? | Compare decisions span by span (tree, tool args and results, model outputs, tokens, answer); `lab fidelity` reports the share identical. | fidelity.py |
+| Best bug story? | A "hallucinated" refund claim was really a tool returning live state that a later write rewrote inside the conversation. The replay diverged at that exact field. Fix: snapshot tool results. | C-016 |
+| 🆕 How does a fork differ from a replay? | Before the fork point it serves the recording *by position*, because the override changes the requests' hashes; after it, calls go live with the override swapped in at the boundary. | D-037 |
+| 🆕 How do forked steps see the right state? | Recorded writes are re-applied to the simulator (event sourcing); the clock continues the recorded timeline. | D-038 |
+| 🆕 What stops a fork issuing a real refund? | Live write tools run only through a simulator; otherwise `ForkBlocked` stops the run. | D-039 |
+| 🆕 How do you know the fix worked, not luck? | N forks vs N controls, scored by the task, Fisher's exact test: 5/5 vs 0/5 gives p = 0.008. | D-040 |
+| 🆕 Where does a fork actually run? | In a worker with the agent's code: queued in a DB table, claimed by compare-and-set, results back over HTTP. | D-041, D-042 |
+| 🆕 Most interesting fork? | ALR-999: a fix that made it worse, then a "significant" fix that was the agent inventing alert IDs past the LLM judge. A cheap `grounded` check exposed it, then a real fix gave 5/5 vs 0/5. | STORY.md |
 
 ---
 
@@ -562,18 +641,23 @@ boundary is the SDK client, not our loop.
 | Rate limiting | `llm/ratelimit.py` | `AGENTLAB_RPM=5 uv run lab eval datasets/triage.jsonl --tasks triage-db-pool` and look at the "wait left out" line. |
 | The tree layout | `ui/src/lib/layout.ts` | Change `GAP_Y` and rebuild; or break the centring and see which test fails (`npm test`). |
 | The API | `server.py` | Open http://127.0.0.1:8000/docs and call `/api/runs?status=error`. |
-| 🆕 Replay | `replay/session.py` | `env -u GEMINI_API_KEY uv run lab replay <run-id>`: no key, no network, same tree. |
-| 🆕 Divergence | `replay/session.py` | Change one word of the triage `SYSTEM_PROMPT`, run `lab replay` on a triage run, read the path it reports, then revert. |
-| 🆕 Side effects | `tools.py` `_replay` | Put `print("REFUND!")` in `refund_payment`, replay a refund run: nothing prints. |
-| 🆕 Aliasing | `tools.py` `invoke` | Remove the `copy.deepcopy` and run `pytest tests/test_tools.py`: see which test fails and why. |
-| 🆕 The clock | `determinism.py` | In a Python shell, inside `agent_run`, call `lab.now()` twice; then look at the run's `clock` recordings in SQLite. |
+| Replay | `replay/session.py` | `env -u GEMINI_API_KEY uv run lab replay <run-id>`: no key, no network, same tree. |
+| Divergence | `replay/session.py` | Change one word of the triage `SYSTEM_PROMPT`, run `lab replay` on a triage run, read the path it reports, then revert. |
+| Side effects | `tools.py` `_replay` | Put `print("REFUND!")` in `refund_payment`, replay a refund run: nothing prints. |
+| Aliasing | `tools.py` `invoke` | Remove the `copy.deepcopy` and run `pytest tests/test_tools.py`: see which test fails and why. |
+| The clock | `determinism.py` | In a Python shell, inside `agent_run`, call `lab.now()` twice; then look at the run's `clock` recordings in SQLite. |
+| 🆕 Fork | `fork/runner.py` | `lab fork <a failed eval run> --step N --append-prompt "…" -n 3`, then open the fork page in the UI. |
+| 🆕 Controls | `fork/stats.py` | Run the same fork twice and compare the two control rates; then `fisher_exact(5,0,3,2)` in a shell. |
+| 🆕 Write safety | `tools.py` `_fork_fn` | Remove `simulated=True` from `refund_payment` and fork a refund run at step 2: watch `ForkBlocked`. Revert. |
+| 🆕 Workers | `fork/worker.py` | `lab ui --no-worker`, queue a fork in the UI, then run `lab worker --once` in another terminal. |
+| 🆕 Over HTTP | `remote.py` | `AGENTLAB_TOKEN=x lab ui --no-worker`, then `AGENTLAB_TOKEN=x lab worker --server http://127.0.0.1:8000 --once`; try a wrong token. |
 
 ### Ways to work with Claude so you don't get lost
 
 - Ask for smaller slices: "implement only X, then stop and explain it".
 - Ask for the plan before the code: which files will change, and why.
-- Write one piece yourself each phase and ask Claude to review it. In Phase 4, try the pass-rate
-  summary for N forks (pass count, rate, and the spread across runs).
+- Write one piece yourself each phase and ask Claude to review it. In Phase 5, try the step
+  alignment for Trajectory Diff: given two runs' step lists, find the first step where they differ.
 - Ask "where does this value come from?" about any field in the UI, and follow it from the model's
   response to the database to the screen.
 
@@ -645,6 +729,31 @@ boundary is the SDK client, not our loop.
     `$.config.system_instruction`, while every triage run replayed identically.
   - The new refund task fails because the agent never gives the refund ID: a prompt gap, kept as
     the Phase 4 fork demo.
-- **Experiments:** see the 🆕 rows in Section 7's table. Start with replaying a run with
+- **Experiments:** see the rows in Section 7's table. Start with replaying a run with
   `env -u GEMINI_API_KEY`, then break the prompt and read the divergence.
+
+### Phase 4: Fork & Replay
+- **Added:**
+  - `ForkSession` and `Override` in `replay/session.py`;
+  - `fork/` (point, stats, runner, worker) and `remote.py`;
+  - fork branches at both boundaries; simulators for write tools;
+  - a `forks` table that doubles as the job queue; the `grounded` check;
+  - `lab fork` and `lab worker`, and a worker inside `lab ui`;
+  - `POST /api/forks`, `/api/forks/{id}`, `/family` and `/api/store/*`;
+  - the fork dialog, fork page and run family in the UI;
+  - [STORY.md](STORY.md).
+- **Key ideas:**
+  - counterfactuals, and matching by position vs. by hash;
+  - overrides applied at the boundary;
+  - event sourcing; clocks across processes;
+  - test doubles (fake, stub, mock);
+  - controls, Fisher's exact test, sample size and sampling noise;
+  - a job queue in SQL with compare-and-set;
+  - RPC over HTTP with a bearer token.
+- **Things that went wrong, and are worth retelling:**
+  - The first ALR-999 fix was worse (0/5 vs 3/5).
+  - The second "significant" one was the agent inventing alert IDs that fooled the judge.
+  - The same control scored 3/5 and then 0/5.
+- **Experiments:** see the 🆕 rows in Section 7's table. Start by forking a failed eval run from
+  the UI and reading the fork page.
 

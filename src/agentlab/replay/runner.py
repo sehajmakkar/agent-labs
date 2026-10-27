@@ -25,7 +25,7 @@ from agentlab.loop import Agent, run_agent
 from agentlab.replay.fidelity import FidelityReport, compare
 from agentlab.replay.session import ReplayDivergence, ReplaySession, replaying
 from agentlab.retry import RetryPolicy
-from agentlab.store import Store, run_message
+from agentlab.store import RunRow, Store, run_message
 
 DEFAULT_MAX_ATTEMPTS = 10  # for runs recorded before their retry limit was
 
@@ -71,36 +71,10 @@ def replay_run(
 
     replay_id = uuid.uuid4().hex
     session = ReplaySession.from_rows(run_id, store.run_recordings(run_id), replay_id)
-    error: Exception | None = None
-    with replaying(session):
-        try:
-            if entry is not None:
-                inputs = source.input
-                entry(**inputs) if isinstance(inputs, dict) else entry(inputs)
-            else:
-                settings = _settings(store, run_id)
-                run_agent(
-                    agents[source.agent_name],
-                    llm=replay_llm(),
-                    model=source.model or "",
-                    user_message=run_message(source),
-                    max_steps=settings.get(semconv.RUN_MAX_STEPS) or 10,
-                    timeout_s=settings.get(semconv.RUN_TIMEOUT_S),
-                    # Same retry limit as the source, but no waiting between recorded failures.
-                    retry=RetryPolicy(
-                        max_attempts=settings.get(semconv.RUN_MAX_ATTEMPTS) or DEFAULT_MAX_ATTEMPTS,
-                        sleep=lambda _: None,
-                    ),
-                    task_id=source.task_id,
-                    run_id=replay_id,
-                )
-        except Exception as e:
-            error = e
-
-    if store.get_run(replay_id) is None:
-        raise RuntimeError(
-            "The entry point did not start a run; is it decorated with @lab.agent?"
-        ) from error
+    # No waiting between recorded failures: nothing is being retried for real.
+    error = run_in_session(
+        store, source, session, agents=agents, entry=entry, llm=replay_llm(), sleep=lambda _: None
+    )
 
     report = compare(
         store.spans(run_id),
@@ -113,6 +87,49 @@ def replay_run(
     message = f"{type(error).__name__}: {error}" if error else None
     store.set_replay_report(replay_id, asdict(report) | {"error": message})
     return ReplayResult(run_id, replay_id, report, message)
+
+
+def run_in_session(
+    store: Store,
+    source: RunRow,
+    session: ReplaySession,
+    *,
+    agents: dict[str, Agent] | None,
+    entry: Callable[..., Any] | None,
+    llm: GeminiClient,
+    sleep: Callable[[float], None],
+) -> Exception | None:
+    """Run the source run's code again inside `session` (a replay or a fork), as run
+    `session.replay_run_id`. Returns the exception the agent raised, if any."""
+    error: Exception | None = None
+    with replaying(session):
+        try:
+            if entry is not None:
+                inputs = source.input
+                entry(**inputs) if isinstance(inputs, dict) else entry(inputs)
+            else:
+                settings = _settings(store, source.id)
+                run_agent(
+                    agents[source.agent_name],
+                    llm=llm,
+                    model=source.model or "",
+                    user_message=run_message(source),
+                    max_steps=settings.get(semconv.RUN_MAX_STEPS) or 10,
+                    timeout_s=settings.get(semconv.RUN_TIMEOUT_S),
+                    retry=RetryPolicy(
+                        max_attempts=settings.get(semconv.RUN_MAX_ATTEMPTS) or DEFAULT_MAX_ATTEMPTS,
+                        sleep=sleep,
+                    ),
+                    task_id=source.task_id,
+                    run_id=session.replay_run_id,
+                )
+        except Exception as e:
+            error = e
+    if store.get_run(session.replay_run_id) is None:
+        raise RuntimeError(
+            "The entry point did not start a run; is it decorated with @lab.agent?"
+        ) from error
+    return error
 
 
 def load_entry(spec: str) -> Callable[..., Any]:

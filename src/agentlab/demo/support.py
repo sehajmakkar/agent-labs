@@ -124,7 +124,9 @@ def get_shipment(order_id: str) -> dict:
     return {"order_id": order_id, **SHIPMENTS[order_id]}
 
 
-@tool(kind="write")
+# `simulated=True`: this demo's "payment system" is the per-run SupportBackend above, so a fork may
+# run the real function. A tool that called a real gateway would register `@refund.simulator`.
+@tool(kind="write", simulated=True)
 def refund_payment(payment_id: str, reason: str) -> dict:
     """Refund one captured payment in full. This moves real money: use it only as the policy allows.
 

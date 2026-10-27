@@ -189,16 +189,24 @@ class _TracedModels:
             semconv.PROVIDER_NAME: semconv.PROVIDER_GEMINI,
             semconv.REQUEST_MODEL: model,
         }
-        request = _request_json(model, contents, config)
         session = replay.current()
+        served = None
+        if session:
+            original = _request_json(model, contents, config)
+            served = session.take("llm", original, request_hash(original))
+            if served is replay.LIVE and isinstance(session, replay.ForkSession):
+                # Past the fork point: the override is applied here, at the boundary, so it works
+                # for any agent, ours or a customer's.
+                model, config = _apply_override(session.override, model, config)
+                attributes[semconv.REQUEST_MODEL] = model
+        request = _request_json(model, contents, config)
         with span("llm", f"chat {model}", attributes=attributes) as s:
-            if session:
-                recorded = session.take("llm", request, request_hash(request))
+            if served is not None and served is not replay.LIVE:
                 s.attributes[semconv.REPLAYED] = True
-                if "error" in recorded:
-                    s.record(request, recorded)
-                    raise _rebuild_error(recorded["error"])
-                response = types.GenerateContentResponse.model_validate(recorded)
+                if "error" in served:
+                    s.record(request, served)
+                    raise _rebuild_error(served["error"])
+                response = types.GenerateContentResponse.model_validate(served)
             else:
                 try:
                     response = self._models.generate_content(
@@ -214,7 +222,8 @@ class _TracedModels:
             s.output_tokens = parsed.usage.output_tokens
             s.thinking_tokens = parsed.usage.thinking_tokens
             # A replayed call costs nothing: no request reached Gemini.
-            s.cost_usd = 0.0 if session else cost_usd(model, parsed.usage)
+            replayed = served is not None and served is not replay.LIVE
+            s.cost_usd = 0.0 if replayed else cost_usd(model, parsed.usage)
             s.output = {
                 "text": parsed.message.text,
                 "tool_calls": [{"name": c.name, "args": c.args} for c in parsed.message.tool_calls],
@@ -236,6 +245,16 @@ class _TracedModels:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._models, name)
+
+
+def _apply_override(override: Any, model: str, config: Any) -> tuple[str, Any]:
+    if override.model:
+        model = override.model
+    if override.system_prompt is not None:
+        config = (config or types.GenerateContentConfig()).model_copy(
+            update={"system_instruction": override.system_prompt}
+        )
+    return model, config
 
 
 def _error_json(e: Exception) -> dict[str, Any]:

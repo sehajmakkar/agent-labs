@@ -4,18 +4,21 @@ import { useCallback, useEffect, useState } from "react";
 // routing, so the FastAPI app only has to serve index.html.
 export type Route =
   | { page: "runs" }
-  | { page: "run"; id: string; span?: string }
+  | { page: "run"; id: string; span?: string; fork?: boolean }
   | { page: "evals" }
-  | { page: "eval"; id: string };
+  | { page: "eval"; id: string }
+  | { page: "fork"; id: string };
 
 function parse(hash: string): Route {
   const [path, query = ""] = hash.replace(/^#/, "").split("?");
   const parts = path.split("/").filter(Boolean);
   if (parts[0] === "runs" && parts[1]) {
-    const span = new URLSearchParams(query).get("span") ?? undefined;
-    return { page: "run", id: parts[1], span };
+    const params = new URLSearchParams(query);
+    // `?span=<id>&fork=1` opens the fork dialog for that span, so a link can point straight at it.
+    return { page: "run", id: parts[1], span: params.get("span") ?? undefined, fork: params.has("fork") };
   }
   if (parts[0] === "evals" && parts[1]) return { page: "eval", id: parts[1] };
+  if (parts[0] === "forks" && parts[1]) return { page: "fork", id: parts[1] };
   if (parts[0] === "evals") return { page: "evals" };
   return { page: "runs" };
 }

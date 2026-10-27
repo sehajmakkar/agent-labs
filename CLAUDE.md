@@ -40,6 +40,12 @@ around it.
   - put new files into the reading order, with ★ ratings;
   - update the end-to-end flow and the line references;
   - add a "Phase N recap" with experiments to try.
+- **STORY.md**: the project told as one narrative, with tree diagrams: what was built, how it
+  works, why each piece exists, and what comes next. At the end of every phase:
+  - turn the phase's "what comes next" section into a chapter about what was actually built and
+    seen, with real numbers and real runs;
+  - update "What comes next", the platform map and the "Last updated" line;
+  - write it so the author can retell it in an interview or a demo.
 - Update these files in the same change that causes the entry, not afterwards.
 - Work in phases from [PLAN.md](PLAN.md). Each phase must end in something demoable, with its
   learnings written up. Update PLAN.md if scope changes, and record why in decisions.md.
@@ -59,7 +65,11 @@ around it.
   - `tracing.py`: spans, runs, context propagation, `@agent`, `init()`.
   - `store.py`: SQLite tables (runs, spans, recordings, eval runs and results); an additive
     migration adds new columns on startup (D-031).
-  - `replay/`: the replay session (record/replay by request hash), fidelity check, and runner.
+  - `replay/`: the replay session (record/replay by request hash), `ForkSession` (replay by
+    position up to a fork point, then live), the fidelity check, and the runner.
+  - `fork/`: fork points, Fisher's exact test, the fork runner (N forks plus N controls, scored),
+    and the worker loop.
+  - `remote.py`: `RemoteStore`, the store over HTTP (`lab.init("http://…")`, `lab worker --server`).
   - `determinism.py`: `lab.now()`, `lab.monotonic()`, `lab.random()`, which are replayable.
   - `semconv.py`: span attribute names (OTel GenAI v1.41.0 plus our `agentlab.*`).
   - `llm/`: neutral types, the Gemini adapter, `wrap_genai_client` (the model-call boundary) and
@@ -89,6 +99,8 @@ uv run lab eval datasets/support.jsonl datasets/triage.jsonl   # score 20 tasks 
 uv run lab evals / lab report <id>        # past eval runs
 uv run lab replay <run-id> [--entry FILE.py:FUNCTION]   # offline replay + fidelity (no API key needed)
 uv run lab fidelity                       # replay recent demo runs, share that reproduce exactly
+uv run lab fork <run> --step N --append-prompt "…" -n 5   # fork with a control; needs API key
+uv run lab worker [--entry FILE.py:FN] [--server URL] [--once]   # run queued fork jobs
 (cd ui && npm install && npm run build && npm test)   # UI build and layout tests
 uv run lab ui                             # API + UI on http://127.0.0.1:8000 (Vite dev: cd ui && npm run dev)
 ```
@@ -101,6 +113,11 @@ Runs are saved to `.agentlab/lab.db` (git-ignored). New nullable columns are add
 Replay rules (D-030 to D-035): any new source of nondeterminism in agent code must go through an
 interceptor (`lab.now()`, `lab.random()`, a wrapped client or `@tool`). Tool results are deep-copied
 snapshots. During replay no tool or model is ever called.
+
+Fork rules (D-037 to D-042): overrides are applied at the boundaries, never inside agent code. A
+live write tool in a fork runs only through a simulator (`simulated=True` or `@tool.simulator`),
+otherwise `ForkBlocked`. The API server never executes agent code: it queues fork jobs, and
+workers run them. `AGENTLAB_TOKEN` guards `/api/store/*` when set.
 
 ## Current status
 
@@ -118,7 +135,13 @@ snapshots. During replay no tool or model is ever called.
   randomness, recorded failures, a fidelity check, `lab replay` / `lab fidelity`, a Replay button
   in the UI, and the support agent's `refund_payment` write tool on a per-run simulated backend.
   79 Python tests; verified offline on real runs.
-- Next: Phase 4 (Fork & Replay). See the checklist in PLAN.md.
+- **Phase 4 done** (2026-10-27): forks from any step, model call or tool call, with prompt, model
+  or tool-output overrides; N forks plus N controls scored by the task, with Fisher's exact test;
+  write-tool simulators; a fork job queue with `lab worker` (local or over HTTP via
+  `RemoteStore`); the UI's fork dialog, fork page and run family; the `grounded` eval check;
+  STORY.md. 97 Python tests; verified live (refund fix 5/5 vs 0/5, p = 0.008).
+- Next: Phase 5 (Trajectory Diff). See the checklist in PLAN.md. Tier 1 outreach can start (the
+  author's step).
 - Stack accepted (D-003 to D-006, D-011):
   - Python 3.12 with uv, FastAPI, SQLite/SQLModel, React + React Flow.
   - Our own agent loop with interception at the LLM client and tool functions. No LangGraph in the

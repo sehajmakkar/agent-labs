@@ -5,7 +5,7 @@ Entries marked _anticipated_ were identified during planning and have not been h
 
 ---
 
-## C-001 — LLM nondeterminism breaks exact replay _(partly resolved)_
+## C-001 — LLM nondeterminism breaks exact replay _(resolved)_
 - **Problem:** Re-running a step live may give a different answer even with identical input, so a
   difference between a fork and the original may not be caused by the change.
 - **Resolution:** Open. Ideas: serve recorded responses for unchanged steps; run several samples of
@@ -15,6 +15,10 @@ Entries marked _anticipated_ were identified during planning and have not been h
 - **Update 2026-10-27 (Phase 3):** Half solved. Replay serves every recorded step, so unchanged
   steps can no longer vary: 14 of 14 recorded triage runs replayed identically, offline. Steps
   that run live after a fork still vary; that's Phase 4's N-sample forks.
+- **Resolved 2026-10-27 (Phase 4):** Every fork job runs N times with the change *and* N times
+  without it (a control), and compares the pass counts with Fisher's exact test (D-040). Seen live
+  on the ALR-999 failure: the control passed 3 of 5, so the original failure was partly bad luck at
+  step 2. A single rerun could not have told a fix from a fluke.
 
 ## C-002 — Tools with side effects during replay _(resolved)_
 - **Problem:** Replaying a run that sent an email or wrote to a database would do it again.
@@ -23,7 +27,7 @@ Entries marked _anticipated_ were identified during planning and have not been h
   call with no recording stops the replay instead of falling back to the real tool. Tested with a
   write tool whose call counter must not move (decisions.md D-030).
 
-## C-003 — Tool calls after a fork have no recording _(partly resolved)_
+## C-003 — Tool calls after a fork have no recording _(resolved)_
 - **Problem:** After a fork the agent may call tools with arguments never seen before, so there is
   nothing recorded to serve back, and calling a real write tool is unsafe.
 - **Resolution:** Open. Plan: every demo agent runs against a deterministic simulated backend
@@ -32,6 +36,14 @@ Entries marked _anticipated_ were identified during planning and have not been h
   copy of the seed data, and `refund_payment` writes to it. Still open for Phase 4: a way for
   customers to register simulators for their own write tools, since forks are when those would
   run without a recording (D-034).
+- **Resolved 2026-10-27 (Phase 4):**
+  - After the fork point, read tools run for real.
+  - Write tools run only as `simulated=True` or through a registered `@tool.simulator`;
+    otherwise the fork stops with `ForkBlocked` (D-039).
+  - Recorded writes before the fork point are re-applied to the simulator, so the live part sees
+    the same state, for example the refund already made (D-038).
+  - Tests cover all four cases, including a write tool with no simulator, whose real function
+    must never be called.
 
 ## C-004 — Ground truth for Auto-Blame _(anticipated)_
 - **Problem:** To measure whether blame finds the right step we need runs where the faulty step is
@@ -153,4 +165,20 @@ Entries marked _anticipated_ were identified during planning and have not been h
   replay was identical.
 - **Lesson:** The fidelity check found a bug in *our* code that looked like a model failure. Without
   replay it would have been logged as a hallucination.
+
+## C-017 — Two processes' monotonic clocks can't be compared _(resolved before it bit)_
+- **Problem:** The loop's deadline is `start + timeout`, read from `lab.monotonic()`. In a fork,
+  `start` comes from the recording (the original process's monotonic clock), but later reads are
+  live (this process's clock). Monotonic clocks count from an arbitrary point per process, so the
+  comparison is meaningless: a fork would time out at once, or never.
+- **Resolution:** `ForkSession.continue_clock` pins the first live read to the last recorded value
+  and moves forward from there, so the fork's clock continues the original's timeline (D-038).
+  A unit test checks the arithmetic.
+
+## C-018 — Forks wait forever with no worker, and a crashed worker strands its job _(open)_
+- **Problem:** Fork jobs are only run by workers (D-041). With none running, a fork stays
+  "queued"; if a worker dies mid-job, the job stays "running" for good.
+- **Mitigation:** `lab ui` runs a worker for the demo agents itself, and the fork page tells you
+  to start `lab worker` when a job is waiting.
+- **Still open:** job leases with a heartbeat, so a dead worker's job is re-queued.
 

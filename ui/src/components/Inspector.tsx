@@ -1,11 +1,26 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
-import { api, type Recording, type Span } from "../api";
+import { api, type Recording, type RunSummary, type Span } from "../api";
 import { money, tokens } from "../lib/format";
 import { useLoad } from "../lib/hooks";
+import { ForkDialog } from "./ForkDialog";
 
 /** Everything recorded about one span. For a model call, that is the exact prompt and reply. */
-export function Inspector({ span, onClose }: { span: Span; onClose: () => void }) {
+export function Inspector({
+  span,
+  spans,
+  run,
+  openFork = false,
+  onClose,
+}: {
+  span: Span;
+  spans: Span[];
+  run: RunSummary;
+  openFork?: boolean;
+  onClose: () => void;
+}) {
+  const [forking, setForking] = useState(openFork);
+  const forkable = span.kind !== "agent" && run.mode !== "replay";
   const recordings = useLoad(
     () => (span.kind === "llm" || span.kind === "tool" ? api.recordings(span.id) : Promise.resolve([])),
     span.id,
@@ -31,6 +46,15 @@ export function Inspector({ span, onClose }: { span: Span; onClose: () => void }
           ×
         </button>
       </header>
+
+      {forkable && (
+        <button className="fork-button" onClick={() => setForking(true)}>
+          ⑂ Fork from here
+        </button>
+      )}
+      {forking && (
+        <ForkDialog run={run} span={span} spans={spans} onClose={() => setForking(false)} />
+      )}
 
       {span.error && (
         <Section title="Error">
@@ -69,8 +93,8 @@ export function Inspector({ span, onClose }: { span: Span; onClose: () => void }
 
       {span.kind === "step" && (
         <p className="muted">
-          A step is one model decision plus the tool calls it asked for. Fork & Replay (Phase 4)
-          will restart a run from here.
+          A step is one model decision plus the tool calls it asked for. Forking here replays
+          everything before it and lets the model decide this step again, with your change.
         </p>
       )}
 
