@@ -25,6 +25,8 @@ def render_run(run: RunRow, spans: list[SpanRow]) -> str:
         f"{tokens:,} tokens",
         _money(sum(costs)) if costs else "cost unknown",
     ]
+    if run.mode == "replay" and run.parent_run_id:
+        header.insert(1, f"replay of {run.parent_run_id[:8]}")
     lines = [" · ".join(part for part in header if part)]
     if run.error:
         lines.append(f"error: {run.error}")

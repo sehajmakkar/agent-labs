@@ -32,7 +32,25 @@ export type RunSummary = {
   tokens: number;
   cost_usd: number | null;
   parent_run_id: string | null;
+  mode: "record" | "replay";
+  replay_report: ReplayReport | null;
   eval: EvalSummary | null;
+};
+
+export type ReplayReport = {
+  identical: boolean;
+  spans_compared: number;
+  differences: string[];
+  unused_recordings: number;
+  fallbacks: Record<string, number>;
+  error: string | null;
+};
+
+export type ReplayResponse = {
+  run_id: string;
+  identical: boolean;
+  summary: string;
+  differences: string[];
 };
 
 export type SpanKind = "agent" | "step" | "llm" | "tool";
@@ -56,7 +74,7 @@ export type Span = {
   cost_usd: number | null;
 };
 
-export type RunDetail = { run: RunSummary; spans: Span[] };
+export type RunDetail = { run: RunSummary; spans: Span[]; replays: RunSummary[] };
 
 export type Recording = { kind: string; request_hash: string; request: any; response: any };
 
@@ -89,8 +107,8 @@ export type EvalRun = {
 
 export type EvalDetail = { eval: EvalRun; runs: RunSummary[] };
 
-async function get<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+async function get<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init);
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.detail ?? `${response.status} ${response.statusText}`);
@@ -106,6 +124,7 @@ export const api = {
     return get<RunSummary[]>(`/api/runs?${query}`);
   },
   run: (id: string) => get<RunDetail>(`/api/runs/${id}`),
+  replay: (id: string) => get<ReplayResponse>(`/api/runs/${id}/replay`, { method: "POST" }),
   recordings: (spanId: string) => get<Recording[]>(`/api/spans/${spanId}/recordings`),
   evals: () => get<EvalRun[]>("/api/evals"),
   eval: (id: string) => get<EvalDetail>(`/api/evals/${id}`),

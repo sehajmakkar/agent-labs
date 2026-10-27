@@ -1,5 +1,6 @@
 import { api } from "../api";
 import { Inspector } from "../components/Inspector";
+import { ReplayPanel } from "../components/ReplayPanel";
 import { Outcome } from "../components/RunStatus";
 import { TraceTree } from "../components/TraceTree";
 import { activeSeconds, money, seconds, tokens } from "../lib/format";
@@ -10,7 +11,7 @@ export function RunView({ id, spanId }: { id: string; spanId?: string }) {
   if (detail.error) return <p className="page error-text">Could not load run: {detail.error}</p>;
   if (!detail.data) return <p className="page muted">Loading…</p>;
 
-  const { run, spans } = detail.data;
+  const { run, spans, replays } = detail.data;
   const selected = spans.find((s) => s.id === spanId);
   const select = (span?: string) =>
     navigate(span ? `#/runs/${id}?span=${span}` : `#/runs/${id}`, true);
@@ -35,6 +36,7 @@ export function RunView({ id, spanId }: { id: string; spanId?: string }) {
           <Stat label="Cost" value={money(run.cost_usd)} />
           <Stat label="Run" value={run.id.slice(0, 8)} mono />
         </div>
+        <ReplayPanel run={run} replays={replays} />
         <div className="run-io">
           <div>
             <div className="eyebrow">User</div>

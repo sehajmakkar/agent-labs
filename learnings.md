@@ -365,3 +365,79 @@ least that long.
   selected span is part of the URL, so a link can point straight at the failing tool call.
 - **Typed API client:** `ui/src/api.ts` mirrors the pydantic response models. When one side
   changes, `tsc` or the API tests catch the mismatch.
+
+## 2026-10-27 — Phase 3: deterministic replay
+
+### Determinism, and where nondeterminism comes from
+A program is deterministic if the same inputs always give the same outputs. An agent isn't, because
+some of its inputs arrive *during* the run:
+- model responses (sampled, and Gemini 3 should stay at temperature 1.0);
+- tool results (the world changes);
+- the clock;
+- random numbers.
+
+Replay makes a run deterministic by recording all of those inputs and feeding them back. The
+agent's own code is deterministic given its inputs, so it then makes the same decisions.
+
+### The record/replay ("VCR") pattern
+The name comes from video recorders and the Ruby library VCR, which records HTTP traffic to
+"cassettes" for tests.
+- **Record:** at each boundary, save the request and the response.
+- **Replay:** run the same code; at each boundary, look the request up and return the saved
+  response instead of calling out.
+
+Ours matches by the **hash of the exact request** (canonical JSON → SHA-256). Recordings that share
+a hash form a queue in recording order, so a retried call replays as fail, fail, succeed, and two
+identical questions in one run get their own answers in order.
+
+### Divergence is information
+If the replayed agent asks for something that was never recorded, its code or inputs have changed.
+We stop and say *where*, by diffing the new request against the next recorded one
+(`$.config.system_instruction`). Giving the support agent a refund policy made all 16 of its
+Phase 2 runs diverge at exactly that path; the 14 triage runs, untouched, replayed identically.
+That is regression detection for free: replay last week's runs against today's code and see what
+changed.
+
+### Replay fidelity
+"Identical" means the agent made the same decisions: the same tree shape, statuses, tool arguments
+and results, model outputs, token counts and final answer. It does *not* mean the same IDs,
+timestamps, durations or cost, which always differ, and a replay costs $0. The README's **Replay
+Fidelity** metric is the share of recorded runs that replay identically (`lab fidelity`).
+
+### Side effects and idempotency
+- During replay, *no* tool runs, read or write. Reads are served too, because the world may have
+  changed since (a payment refunded since then), and the replay must see what the original saw.
+- Writes are the dangerous half: a replayed refund must never move money again.
+- **Idempotency** is the production version of the same worry: an operation is idempotent if doing
+  it twice has the same effect as once. Payment APIs take an *idempotency key*, so a retried
+  request can't double-charge. Our refund tool isn't idempotent (a second call fails: "already
+  refunded"), which is exactly why replay must serve it from the recording.
+
+### Clock and randomness
+An agent that writes "Today is Tuesday" into its prompt changes its request every day, so a strict
+replay would diverge. `lab.now()`, `lab.monotonic()` and `lab.random()` route these through the
+interceptor: real values while recording, saved values while replaying. The loop's deadline check
+reads `lab.monotonic()`, so a run that timed out at step 3 replays as a timeout at step 3.
+
+### Seen live: replay found our bug, not the model's
+The first refund run ended with "P-902 was already refunded… I've processed another refund", which
+looked like a hallucination. Its replay diverged at `payments[1].status` inside the *step-1* tool
+result, as resent in step 3. `get_payments` had returned a reference to live backend state, and
+the later refund rewrote that earlier result in the conversation. The model accurately described
+the corrupted history it was shown. Fix: tool results are deep-copied at the boundary (C-016,
+D-035). Two lessons:
+1. Aliasing (two names for one mutable object) can rewrite history.
+2. Many "hallucinations" are bad inputs. Look at what the model was actually sent before blaming
+   it; the inspector shows exactly that.
+
+### Thought signatures, verified on real data
+Every live Flash-Lite response carried a `thought_signature`, an opaque blob that must go back to
+Gemini unchanged in the next turn. Replay rebuilds each response from its stored JSON (bytes as
+base64), the loop resends it, and the next request hashes identically. So the signature survived
+storage byte for byte (C-005).
+
+### Schema evolution without losing data
+Adding columns to existing tables is the easy kind of migration: `ALTER TABLE … ADD COLUMN`, with
+nullable columns so old rows stay valid. `Store` does that automatically on startup (D-031).
+Renames and type changes are the hard kind; they need versioned migrations (Alembic) and data
+copying.

@@ -34,3 +34,16 @@ def test_invoke_rejects_missing_arguments():
 
 def test_tool_is_still_callable_directly():
     assert lookup("1", limit=2) == {"order_id": "1", "limit": 2}
+
+
+def test_results_are_snapshots_so_later_writes_cannot_change_them():
+    state = {"status": "captured"}
+
+    @tool(kind="read")
+    def read_state() -> dict:
+        """Return live state."""
+        return state
+
+    result = read_state()
+    state["status"] = "refunded"  # a later write tool changes the backend
+    assert result == {"status": "captured"}

@@ -1,7 +1,10 @@
 """The lab's HTTP API, read by the web UI (`lab ui`).
 
-A thin read-only layer over the trace store. Response models are pydantic classes, so FastAPI
-validates what we send and documents every endpoint at /docs (OpenAPI) for free.
+A thin layer over the trace store. Every endpoint reads, except `POST /api/runs/{id}/replay`, which
+is safe to offer because a replay calls nothing outside the process: no model, no tools.
+
+Response models are pydantic classes, so FastAPI validates what we send and documents every
+endpoint at /docs (OpenAPI) for free.
 
 The built UI (`ui/dist`, from `npm run build`) is served at `/` when it exists. During UI
 development, Vite serves the UI instead and forwards `/api` requests here.
@@ -53,6 +56,8 @@ class RunSummary(BaseModel):
     tokens: int
     cost_usd: float | None
     parent_run_id: str | None
+    mode: str  # record | replay
+    replay_report: dict[str, Any] | None
     eval: EvalSummary | None
 
 
@@ -78,6 +83,14 @@ class Span(BaseModel):
 class RunDetail(BaseModel):
     run: RunSummary
     spans: list[Span]
+    replays: list[RunSummary]  # replays of this run, newest first
+
+
+class ReplayResponse(BaseModel):
+    run_id: str
+    identical: bool
+    summary: str
+    differences: list[str]
 
 
 class Recording(BaseModel):
@@ -117,7 +130,31 @@ def create_app(store: Store, ui_dist: Path | None = UI_DIST) -> FastAPI:
         if run is None:
             raise HTTPException(404, f"No run {run_id}")
         (summary,) = _summaries(store, [run])
-        return RunDetail(run=summary, spans=[_span(s) for s in store.spans(run_id)])
+        return RunDetail(
+            run=summary,
+            spans=[_span(s) for s in store.spans(run_id)],
+            replays=_summaries(store, store.replays_of(run_id)),
+        )
+
+    @app.post("/api/runs/{run_id}/replay", response_model=ReplayResponse)
+    def replay(run_id: str):
+        from agentlab import tracing
+        from agentlab.demo import demo_agents
+        from agentlab.replay.runner import replay_run
+
+        if store.get_run(run_id) is None:
+            raise HTTPException(404, f"No run {run_id}")
+        tracing.init(store)  # the replay is recorded as a run in this same store
+        try:
+            result = replay_run(store, run_id, agents=demo_agents())
+        except LookupError as e:  # not a demo agent: replay it from its own code with the CLI
+            raise HTTPException(400, str(e)) from e
+        return ReplayResponse(
+            run_id=result.run_id,
+            identical=result.report.identical,
+            summary=result.report.summary(),
+            differences=result.report.differences,
+        )
 
     @app.get("/api/spans/{span_id}/recordings", response_model=list[Recording])
     def get_recordings(span_id: str):
@@ -173,6 +210,8 @@ def _summary(run: RunRow, totals: RunTotals, result: EvalResultRow | None) -> Ru
         tokens=totals.tokens,
         cost_usd=totals.cost_usd,
         parent_run_id=run.parent_run_id,
+        mode=run.mode or "record",
+        replay_report=run.replay_report,
         eval=EvalSummary(
             eval_run_id=result.eval_run_id,
             task_id=result.task_id,

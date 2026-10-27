@@ -543,3 +543,119 @@ entry's status line.
   offline tests because it calls Gemini. We accept it because it is the clearest proof of the
   integration model (D-009), and it was verified live.
 - **Rationale:** It makes "we plug into their agent" concrete in a demo.
+
+## D-030 — Replay re-runs the agent's code, with every call served from recordings
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Options:**
+  - (a) Re-execute the agent's code, with the interceptors serving recorded responses (the
+    record/replay or "VCR" pattern).
+  - (b) Only re-render the stored trace, executing nothing.
+  - (c) Re-execute, falling back to live calls when a request isn't recorded.
+- **Decision:** (a), strict.
+  - The wrapped model client, `Tool.invoke` and the clock/random functions ask a `ReplaySession`
+    for each response, by the hash of the exact request.
+  - Recordings that share a hash are served in recording order.
+  - An unrecorded request raises `ReplayDivergence`, naming the JSON paths where it differs from
+    the next recorded call.
+- **Trade-offs:**
+  - A replay needs the same agent code: any change to prompts, tools or code makes it diverge.
+    All Phase 2 support runs now diverge, because the support agent changed.
+  - Option (b) would never break, but it proves nothing.
+  - We accept this, because divergence is information: it pinpoints what changed, and the
+    fidelity check found a real bug on its first day (C-016). Live fallback (c) is exactly what a
+    fork needs *after* its fork point, so it arrives in Phase 4 as a separate mode.
+- **Rationale:** Only re-execution shows that the code really produces the recorded behaviour, and
+  fork is defined as "replay up to step N, then go live".
+
+## D-031 — An additive schema migration on startup (partly supersedes D-020)
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:** On startup, `Store` adds any column that the models define but the database lacks
+  (`ALTER TABLE … ADD COLUMN`). Renames, type changes and removals still need a fresh database.
+- **Trade-offs:** It is home-grown and only adds columns. A real migration tool (Alembic) would
+  version every change. We accept it because Phase 3 only added columns, and deleting the database
+  would have thrown away 56 live runs that the fidelity check then used as test data.
+- **Rationale:** It is the least machinery that keeps your data across schema changes. It is
+  tested.
+
+## D-032 — Failed calls are recorded, and a run's limits are stored on the run
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - The model wrapper records failures too (`{"error": {code, details}}`), and a replay raises the
+    same error again. So a 429 followed by a retry replays as the same 429 and retry, without the
+    backoff waits.
+  - `run_agent` stores `max_steps`, `timeout_s` and the retry limit on the root span, and the
+    replay uses them.
+- **Trade-offs:** Each failed attempt adds a recording. Runs from before Phase 3 lack these, so a
+  replay of an old run that had retries shows fewer attempts. We accept this because otherwise a
+  replay of any run that hit a rate limit could never be identical.
+- **Rationale:** The aim is for a replay to reproduce the run, failures included.
+
+## D-033 — Clock and randomness go through the interceptor
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - `lab.now()`, `lab.monotonic()` and `lab.random()` record their values while recording and
+    return them, in order, while replaying.
+  - The loop's timeout clock defaults to `lab.monotonic`, so a run that timed out at step 3
+    replays as a timeout at step 3.
+  - If the source run recorded no reads of that kind (it predates Phase 3), the replay uses live
+    values and says so in its report.
+- **Trade-offs:**
+  - Agent code must call `lab.now()` instead of `datetime.now()` to be replayable, and nothing
+    enforces that.
+  - The lenient fallback for old runs means "identical" can carry a caveat.
+  - We accept both: patching the standard library globally would be invisible and fragile, and the
+    caveat is printed whenever it applies.
+- **Rationale:** This is CLAUDE.md's core rule, "every clock read and random number goes through
+  the interceptor layer". `examples/customer_app.py` puts today's date in its prompt to show why.
+
+## D-034 — A per-run simulated backend for the demo; customer write-tool simulators in Phase 4
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - The support agent gains a write tool, `refund_payment`, which runs against `SupportBackend`:
+    a fresh copy of the seed data for every run, keyed by run ID.
+  - A refund-policy prompt allows refunding only a requested duplicate.
+  - During replay, no tool function runs, read or write.
+  - An SDK hook for customers to register a simulator for their own write tools moves to Phase 4,
+    because forks are the first time a write tool would run without a recording.
+- **Trade-offs:**
+  - The demo's "real" refund is itself simulated, so "writes never reach anything real" is
+    demonstrated for replay, not yet for a customer's live tools.
+  - The policy change invalidated Phase 2 support runs for replay, and changed 5 eval tasks.
+  - We accept both: C-003 called for exactly this backend, and Phase 4 is where simulators are
+    exercised.
+- **Rationale:** Per-run state keeps parallel eval tasks and repeated runs independent. A write tool
+  gives the evals something sharper to catch: money moved when it shouldn't have been.
+
+## D-035 — Tool results are snapshots
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude), after the bug in C-016
+- **Decision:** `Tool.invoke` returns `copy.deepcopy` of what the function returned.
+- **Trade-offs:** It costs a copy per call, and results that can't be deep-copied would fail. We
+  accept it because tool results are small JSON-like data, and an aliased result silently rewrites
+  conversation history.
+- **Rationale:** A tool result is a fact *at the time of the call*. The boundary is the one place
+  that can guarantee that for every tool, including customers' tools.
+
+## D-036 — The API's first write: `POST /api/runs/{id}/replay` (amends D-027)
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - The server replays demo-agent runs on request; the UI's Replay button uses this.
+  - Runs of other agents return 400, pointing to `lab replay <run> --entry FILE.py:FUNCTION`,
+    because only their own code can replay them.
+- **Trade-offs:** The server is no longer read-only. We accept it because a replay reaches nothing
+  outside the process (no network, no tools), so there's nothing unsafe to guard yet.
+- **Rationale:** It makes replay visible in the demo, and it is the endpoint that fork extends in
+  Phase 4.

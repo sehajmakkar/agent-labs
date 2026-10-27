@@ -67,5 +67,6 @@ function meta(span: Span): string {
     parts.push(money(span.cost_usd));
   }
   if (span.kind === "tool") parts.push(compact(span.input, 40));
+  if (span.attributes["agentlab.replay.served"]) parts.unshift("↺ recorded");
   return parts.join(" · ");
 }

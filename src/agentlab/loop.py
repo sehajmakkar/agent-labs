@@ -9,13 +9,13 @@ asked for. A step is one decision by the model plus its consequences, which is t
 will start from in Phase 4 (decisions.md D-015).
 """
 
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from agentlab import semconv
+from agentlab import determinism, semconv
 from agentlab.llm.base import LLMClient, LLMResponse, Message, ToolCall, ToolResult, Usage
+from agentlab.replay.session import ReplayDivergence
 from agentlab.retry import RetryPolicy, call_with_retries
 from agentlab.tools import Tool, describe_error
 from agentlab.tracing import agent_run, span
@@ -63,7 +63,8 @@ def run_agent(
     max_steps: int = 10,
     timeout_s: float | None = None,
     retry: RetryPolicy = DEFAULT_RETRY,
-    clock: Callable[[], float] = time.monotonic,
+    # Read through the interceptor, so a replay sees the same times and times out at the same step.
+    clock: Callable[[], float] = determinism.monotonic,
     task_id: str | None = None,
     run_id: str | None = None,
 ) -> AgentResult:
@@ -77,6 +78,10 @@ def run_agent(
     with agent_run(
         agent.name, input={"message": user_message}, model=model, task_id=task_id, run_id=run_id
     ) as agent_span:
+        # Recorded so a replay can run with the same limits.
+        agent_span.attributes[semconv.RUN_MAX_STEPS] = max_steps
+        agent_span.attributes[semconv.RUN_TIMEOUT_S] = timeout_s
+        agent_span.attributes[semconv.RUN_MAX_ATTEMPTS] = retry.max_attempts
         result = _loop(agent, llm, model, user_message, max_steps, timeout_s, retry, clock)
         result.run_id = agent_span.run_id
         agent_span.output = {"answer": result.answer}
@@ -142,6 +147,8 @@ def _execute(call: ToolCall, tools_by_name: dict[str, Tool]) -> ToolResult:
         return ToolResult(call, {"error": error}, is_error=True)
     try:
         output = tool.invoke(call.args, call_id=call.id)
+    except ReplayDivergence:
+        raise  # not the tool's error: the replay no longer matches the recording
     except Exception as e:
         return ToolResult(call, {"error": describe_error(e)}, is_error=True)
     return ToolResult(call, output if isinstance(output, dict) else {"result": output})

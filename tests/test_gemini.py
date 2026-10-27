@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from fakes import fake_genai, gemini_response
 from google.genai import errors, types
 
 from agentlab import semconv
@@ -14,19 +15,6 @@ from agentlab.tracing import agent_run
 def get_order(order_id: str) -> dict:
     """Look up an order."""
     return {}
-
-
-def gemini_response(parts: list[dict]) -> types.GenerateContentResponse:
-    return types.GenerateContentResponse.model_validate(
-        {
-            "candidates": [{"content": {"role": "model", "parts": parts}}],
-            "usage_metadata": {
-                "prompt_token_count": 40,
-                "candidates_token_count": 12,
-                "thoughts_token_count": 30,
-            },
-        }
-    )
 
 
 def test_from_response_reads_calls_text_and_usage_and_skips_thoughts():
@@ -85,19 +73,6 @@ def test_generate_sends_declarations_and_disables_automatic_calling():
     (declaration,) = config.tools[0].function_declarations
     assert declaration.name == "get_order"
     assert declaration.parameters_json_schema["required"] == ["order_id"]
-
-
-def fake_genai(*responses):
-    """A stand-in for genai.Client that returns the given responses in order."""
-    queue = list(responses)
-
-    def generate_content(**kwargs):
-        item = queue.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    return SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
 
 
 def test_wrapped_client_traces_and_records_each_call(store):

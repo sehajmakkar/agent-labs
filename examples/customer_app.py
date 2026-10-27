@@ -5,6 +5,7 @@ team might write it themselves. The lines marked 1, 2 and 3 are the whole integr
 then shows up in `lab runs` and the web UI like any other.
 
     uv run python examples/customer_app.py "Do I need an umbrella in Pune today?"
+    uv run lab replay <run-id> --entry examples/customer_app.py:answer   # offline, from this code
 """
 
 import os
@@ -42,7 +43,10 @@ TOOLS = {get_forecast.name: get_forecast}
 @lab.agent("weather-bot")
 def answer(question: str) -> str:
     config = types.GenerateContentConfig(
-        system_instruction="Answer weather questions in one or two sentences using the tools.",
+        # `lab.now()`, not `datetime.now()`: the date is recorded, so `lab replay` still matches
+        # tomorrow, when the real date (and so this prompt) would have changed.
+        system_instruction=f"Today is {lab.now():%A %d %B %Y}. Answer weather questions in one "
+        "or two sentences using the tools.",
         tools=[
             types.Tool(
                 function_declarations=[

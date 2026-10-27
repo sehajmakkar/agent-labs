@@ -6,6 +6,8 @@
 - `lab eval DATASET...`: run every task in one or more datasets, score them, print a report
 - `lab evals`: list recent eval runs
 - `lab report EVAL_ID`: print an eval run's report again
+- `lab replay RUN_ID`: re-run a recorded run from its recordings (no network) and check it matches
+- `lab fidelity`: replay recent runs and report how many reproduce exactly
 - `lab ui`: serve the web UI and its API
 - `lab models`: list the Gemini models your API key can use
 """
@@ -63,6 +65,17 @@ def main(argv: list[str] | None = None) -> int:
     report = commands.add_parser("report", help="print the report of a saved eval run")
     report.add_argument("eval_id", help="an eval run ID, or the start of one")
 
+    rp = commands.add_parser("replay", help="replay a run from its recordings, offline")
+    rp.add_argument("run_id", help="a run ID, or the start of one")
+    rp.add_argument(
+        "--entry",
+        help="for runs of your own agent: the @lab.agent function, as FILE.py:FUNCTION or "
+        "MODULE:FUNCTION",
+    )
+
+    fid = commands.add_parser("fidelity", help="replay recent demo-agent runs and score them")
+    fid.add_argument("--limit", type=int, default=20)
+
     ui = commands.add_parser("ui", help="serve the web UI and its API")
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8000)
@@ -83,6 +96,11 @@ def main(argv: list[str] | None = None) -> int:
         return _report(Store(settings.db_path), args.eval_id)
     if args.command == "ui":
         return _ui(Store(settings.db_path), args.host, args.port)
+    # Replays never call Gemini, so they need no API key either.
+    if args.command == "replay":
+        return _replay(settings, agents, args.run_id, args.entry)
+    if args.command == "fidelity":
+        return _fidelity(settings, agents, args.limit)
 
     if not settings.gemini_api_key:
         print(
@@ -172,6 +190,50 @@ def _eval(
     return _report(store, eval_id)
 
 
+def _replay(settings: Settings, agents: dict[str, Agent], run_id: str, entry: str | None) -> int:
+    from agentlab.replay.runner import load_entry, replay_run
+
+    store = tracing.init(settings.db_path)
+    try:
+        source = store.find_run(run_id)
+        result = replay_run(
+            store, source.id, agents=agents, entry=load_entry(entry) if entry else None
+        )
+    except (LookupError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    replay = store.get_run(result.run_id)
+    print(render_run(replay, store.spans(replay.id)))
+    print(f"\nreplay of {source.id[:8]}: {result.report.summary()}")
+    for difference in result.report.differences[:10]:
+        print(f"  ✗ {difference}")
+    print("no model or tool calls were made: every response came from the recording")
+    return 0 if result.report.identical else 1
+
+
+def _fidelity(settings: Settings, agents: dict[str, Agent], limit: int) -> int:
+    from agentlab.replay.runner import replay_run
+
+    store = tracing.init(settings.db_path)
+    sources = [r for r in store.runs(500) if r.mode != "replay" and r.agent_name in agents][:limit]
+    if not sources:
+        print("No recorded runs of the demo agents yet.")
+        return 0
+    identical = 0
+    for source in sources:
+        result = replay_run(store, source.id, agents=agents)
+        identical += result.report.identical
+        mark = "✓" if result.report.identical else "✗"
+        line = f"{mark} {source.id[:8]}  {source.agent_name:8} {source.task_id or '':28} "
+        first = result.report.differences[0] if result.report.differences else ""
+        print(line + (result.report.summary() if result.report.identical else first)[:110])
+    print(
+        f"\nreplay fidelity: {identical}/{len(sources)} runs reproduced exactly "
+        f"({identical / len(sources):.0%})"
+    )
+    return 0
+
+
 def _runs(store: Store, limit: int) -> int:
     rows = store.runs(limit)
     if not rows:
@@ -179,6 +241,8 @@ def _runs(store: Store, limit: int) -> int:
         return 0
     for run in rows:
         message = run_message(run)
+        if run.mode == "replay":
+            message = f"↺ replay of {run.parent_run_id[:8]}"
         print(
             f"{run.id[:8]}  {_local(run.started_at)}  {run.agent_name:10} {run.status:10} "
             f"{message[:60]}"

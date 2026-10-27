@@ -2,7 +2,9 @@
 
 It also holds `wrap_genai_client`, the model-call interception boundary (decisions.md D-004):
 every `generate_content` call made through a wrapped client becomes a `chat` span with a recording
-of the exact request and raw response.
+of the exact request and raw response. Failed calls are recorded too, with their error. During a
+replay the wrapper serves the recorded response (or raises the recorded error) and never calls
+Gemini.
 """
 
 from typing import Any
@@ -16,8 +18,9 @@ from agentlab import semconv
 from agentlab.cost import cost_usd
 from agentlab.llm.base import LLMResponse, Message, ToolCall, TransientLLMError, Usage
 from agentlab.llm.ratelimit import RateLimiter
+from agentlab.replay import session as replay
 from agentlab.tools import Tool
-from agentlab.tracing import note_wait, span
+from agentlab.tracing import note_wait, request_hash, span
 
 # HTTP statuses worth retrying: timeout, rate limit, and server-side failures or overload.
 TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
@@ -186,15 +189,32 @@ class _TracedModels:
             semconv.PROVIDER_NAME: semconv.PROVIDER_GEMINI,
             semconv.REQUEST_MODEL: model,
         }
+        request = _request_json(model, contents, config)
+        session = replay.current()
         with span("llm", f"chat {model}", attributes=attributes) as s:
-            response = self._models.generate_content(model=model, contents=contents, config=config)
-            s.record(_request_json(model, contents, config), _dump(response))
+            if session:
+                recorded = session.take("llm", request, request_hash(request))
+                s.attributes[semconv.REPLAYED] = True
+                if "error" in recorded:
+                    s.record(request, recorded)
+                    raise _rebuild_error(recorded["error"])
+                response = types.GenerateContentResponse.model_validate(recorded)
+            else:
+                try:
+                    response = self._models.generate_content(
+                        model=model, contents=contents, config=config
+                    )
+                except Exception as e:
+                    s.record(request, {"error": _error_json(e)})
+                    raise
+            s.record(request, _dump(response))
 
             parsed = from_response(response, model)
             s.input_tokens = parsed.usage.input_tokens
             s.output_tokens = parsed.usage.output_tokens
             s.thinking_tokens = parsed.usage.thinking_tokens
-            s.cost_usd = cost_usd(model, parsed.usage)
+            # A replayed call costs nothing: no request reached Gemini.
+            s.cost_usd = 0.0 if session else cost_usd(model, parsed.usage)
             s.output = {
                 "text": parsed.message.text,
                 "tool_calls": [{"name": c.name, "args": c.args} for c in parsed.message.tool_calls],
@@ -216,6 +236,20 @@ class _TracedModels:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._models, name)
+
+
+def _error_json(e: Exception) -> dict[str, Any]:
+    """Enough of a failed call to raise the same error again during a replay."""
+    if isinstance(e, errors.APIError):
+        return {"type": "api", "code": e.code, "details": e.details}
+    return {"type": "transport", "message": f"{type(e).__name__}: {e}"}
+
+
+def _rebuild_error(error: dict[str, Any]) -> Exception:
+    if error.get("type") == "api":
+        cls = errors.ClientError if error["code"] < 500 else errors.ServerError
+        return cls(error["code"], error.get("details"))
+    return httpx.TransportError(error.get("message", "recorded transport error"))
 
 
 def _dump(value: Any) -> Any:

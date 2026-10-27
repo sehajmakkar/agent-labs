@@ -11,14 +11,18 @@ def get_order(order_id: str) -> dict: ...
 
 @lab.agent("support")                 # each call becomes a run
 def support_agent(message: str) -> str: ...
+
+Read the clock and random numbers through `lab.now()`, `lab.monotonic()` and `lab.random()`, so
+that `lab replay` can reproduce a run exactly.
 """
 
 from typing import Any
 
+from agentlab.determinism import monotonic, now, random
 from agentlab.tools import tool
 from agentlab.tracing import agent, init, shutdown, span
 
-__all__ = ["agent", "init", "shutdown", "span", "tool", "wrap"]
+__all__ = ["agent", "init", "monotonic", "now", "random", "shutdown", "span", "tool", "wrap"]
 
 
 def wrap(client: Any) -> Any:

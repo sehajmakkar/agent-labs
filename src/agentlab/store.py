@@ -7,9 +7,13 @@
   runs from these, matching calls by `request_hash`.
 - An **eval run** is one pass of a dataset through an agent; each task in it gets an **eval
   result** pointing to the run it produced.
+- A **replay** is a run re-executed from another run's recordings (`mode="replay"`,
+  `parent_run_id` = the source). Its `replay_report` says whether it reproduced the source exactly.
 
-The fork columns on runs (`parent_run_id`, `fork_span_id`, `fork_override`) stay empty until
-Phase 4. They exist now because SQLite has no migrations here yet.
+`fork_span_id` and `fork_override` stay empty until Phase 4.
+
+Schema changes that only *add* nullable columns are applied to an existing database on startup
+(`_add_missing_columns`). Anything bigger still means deleting `.agentlab/lab.db` (D-020, D-031).
 """
 
 import uuid
@@ -37,9 +41,11 @@ class RunRow(SQLModel, table=True):
     error: str | None = None
     started_at: datetime
     ended_at: datetime | None = None
+    mode: str | None = None  # record (or None, for runs before Phase 3) | replay
     parent_run_id: str | None = Field(default=None, index=True)
     fork_span_id: str | None = None
     fork_override: Any = Field(default=None, sa_column=Column(JSON))
+    replay_report: Any = Field(default=None, sa_column=Column(JSON))
 
 
 class SpanRow(SQLModel, table=True):
@@ -69,7 +75,9 @@ class RecordingRow(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     span_id: str = Field(index=True)
-    kind: str  # llm | tool
+    # The order of the call within its run, shared with span `seq`. None for runs before Phase 3.
+    seq: int | None = None
+    kind: str  # llm | tool | clock | random
     request_hash: str = Field(index=True)
     request: Any = Field(default=None, sa_column=Column(JSON))
     response: Any = Field(default=None, sa_column=Column(JSON))
@@ -121,6 +129,7 @@ class Store:
         )
         event.listen(self.engine, "connect", _use_wal)
         SQLModel.metadata.create_all(self.engine)
+        _add_missing_columns(self.engine)
 
     # Runs and spans
 
@@ -132,6 +141,8 @@ class Store:
         model: str | None,
         task_id: str | None,
         run_id: str | None = None,
+        mode: str = "record",
+        parent_run_id: str | None = None,
     ) -> str:
         run = RunRow(
             id=run_id or uuid.uuid4().hex,
@@ -140,6 +151,8 @@ class Store:
             task_id=task_id,
             input=input,
             started_at=datetime.now(UTC),
+            mode=mode,
+            parent_run_id=parent_run_id,
         )
         with Session(self.engine) as session:
             session.add(run)
@@ -151,6 +164,13 @@ class Store:
             run = session.get(RunRow, run_id)
             run.status, run.output, run.error = status, output, error
             run.ended_at = datetime.now(UTC)
+            session.add(run)
+            session.commit()
+
+    def set_replay_report(self, run_id: str, report: Any) -> None:
+        with Session(self.engine) as session:
+            run = session.get(RunRow, run_id)
+            run.replay_report = report
             session.add(run)
             session.commit()
 
@@ -192,6 +212,27 @@ class Store:
     def recordings(self, span_id: str) -> list[RecordingRow]:
         with Session(self.engine) as session:
             return list(session.exec(select(RecordingRow).where(RecordingRow.span_id == span_id)))
+
+    def run_recordings(self, run_id: str) -> list[RecordingRow]:
+        """Every recording of a run, in the order the calls were made."""
+        query = (
+            select(RecordingRow)
+            .join(SpanRow, SpanRow.id == RecordingRow.span_id)
+            .where(SpanRow.run_id == run_id)
+            # Runs before Phase 3 have no recording seq; their span's start order is the next best.
+            .order_by(RecordingRow.seq, SpanRow.seq, RecordingRow.id)
+        )
+        with Session(self.engine) as session:
+            return list(session.exec(query))
+
+    def replays_of(self, run_id: str) -> list[RunRow]:
+        with Session(self.engine) as session:
+            query = (
+                select(RunRow)
+                .where(RunRow.parent_run_id == run_id, RunRow.mode == "replay")
+                .order_by(RunRow.started_at.desc())
+            )
+            return list(session.exec(query))
 
     def run_totals(self, run_ids: list[str]) -> dict[str, RunTotals]:
         """Tokens and cost of each run's model calls, in one query."""
@@ -286,6 +327,25 @@ def run_answer(run: RunRow) -> str | None:
     if isinstance(run.output, dict):
         return run.output.get("answer")
     return None if run.output is None else str(run.output)
+
+
+def _add_missing_columns(engine: Any) -> None:
+    """Add columns that the models define but an older database lacks.
+
+    This is the smallest useful migration: it only ever adds nullable columns, so existing rows
+    stay valid. Renames, type changes or removals still need a fresh database.
+    """
+    with engine.begin() as connection:
+        for table in SQLModel.metadata.sorted_tables:
+            existing = {
+                row[1] for row in connection.exec_driver_sql(f"PRAGMA table_info({table.name})")
+            }
+            for column in table.columns:
+                if column.name not in existing:
+                    kind = column.type.compile(dialect=engine.dialect)
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table.name} ADD COLUMN {column.name} {kind}"
+                    )
 
 
 def _use_wal(connection: Any, _record: Any) -> None:

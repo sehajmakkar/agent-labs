@@ -53,7 +53,7 @@ The lab never hosts your agent. Your agent keeps running in your own code. The l
    def support_agent(message: str): ...
    ```
 
-   Recording works today. Replay, fork and the `read`/`write` guarantees arrive in later phases. [`examples/customer_app.py`](examples/customer_app.py) is a complete agent with its own loop, traced with just these lines.
+   Recording and replay work today: `lab replay <run>` re-runs your agent with every model call, tool call, clock read and random number served from the recording. No network, no cost, and a `write` tool never runs twice. Read time and randomness through `lab.now()` and `lab.random()` so they replay too. Fork arrives next. [`examples/customer_app.py`](examples/customer_app.py) is a complete agent with its own loop, traced with just these lines.
 
 2. **Run it where you already do.** Local development, a CI eval suite (`lab eval tasks.jsonl`), or production with sampling. Every run becomes a replayable trace.
 3. **Debug in the UI.** Open a failed run, then **Blame** → **Fork** from the blamed step with a fix → **Diff** the branches. Forks are run by `lab worker`, a process inside your repo, so they use your real agent code.
@@ -124,6 +124,9 @@ uv run lab run triage "ALR-101 is firing. What's going on?"     # the incident-t
 uv run lab eval datasets/support.jsonl datasets/triage.jsonl   # 20 tasks, scored, with a report
 uv run lab evals              # past eval runs; `lab report <id>` prints one again
 
+uv run lab replay <run-id>    # re-run a recorded run offline and check it reproduces exactly
+uv run lab fidelity           # replay recent runs: what share reproduce exactly?
+
 (cd ui && npm install && npm run build)
 uv run lab ui                 # web UI at http://127.0.0.1:8000: runs, evals, decision trees
 
@@ -148,4 +151,4 @@ The demo datasets include deliberate traps: a prompt injection hidden in an orde
 
 ## Project Status
 
-Early-stage project, built in phases. Done so far: tool-calling agents on Gemini, tracing of every run into a local trace store, evals with programmatic and LLM-judge checks, and a web UI with an interactive decision tree. Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.
+Early-stage project, built in phases. Done so far: tool-calling agents on Gemini, tracing of every run into a local trace store, evals with programmatic and LLM-judge checks, a web UI with an interactive decision tree, and **deterministic replay** (offline, verified span by span against the original run). Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.

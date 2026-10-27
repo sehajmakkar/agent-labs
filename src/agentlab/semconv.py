@@ -24,4 +24,9 @@ TOOL_KIND = "agentlab.tool.kind"  # "read" | "write"
 STEP_INDEX = "agentlab.step.index"
 LLM_ATTEMPTS = "agentlab.llm.attempts"  # 1 means no retries were needed
 RUN_STATUS = "agentlab.run.status"
-RATE_LIMIT_WAIT_S = "agentlab.rate_limit.wait_s"  # time a run spent waiting for our rate limiter
+RATE_LIMIT_WAIT_S = "agentlab.rate_limit.wait_s"
+REPLAYED = "agentlab.replay.served"  # true when a call was served from a recording
+# The settings a run used, so a replay can use the same ones.
+RUN_MAX_STEPS = "agentlab.run.max_steps"
+RUN_TIMEOUT_S = "agentlab.run.timeout_s"
+RUN_MAX_ATTEMPTS = "agentlab.run.max_attempts"  # time a run spent waiting for our rate limiter

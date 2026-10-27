@@ -5,24 +5,33 @@ Entries marked _anticipated_ were identified during planning and have not been h
 
 ---
 
-## C-001 — LLM nondeterminism breaks exact replay _(anticipated)_
+## C-001 — LLM nondeterminism breaks exact replay _(partly resolved)_
 - **Problem:** Re-running a step live may give a different answer even with identical input, so a
   difference between a fork and the original may not be caused by the change.
 - **Resolution:** Open. Ideas: serve recorded responses for unchanged steps; run several samples of
   forked branches and compare distributions, not single runs.
 - **Update 2026-10-27:** Gemini 3 guidance recommends keeping temperature at 1.0, so "just use
   temperature 0" is not an option. Statistical forks (N samples) are required, not optional.
+- **Update 2026-10-27 (Phase 3):** Half solved. Replay serves every recorded step, so unchanged
+  steps can no longer vary: 14 of 14 recorded triage runs replayed identically, offline. Steps
+  that run live after a fork still vary; that's Phase 4's N-sample forks.
 
-## C-002 — Tools with side effects during replay _(anticipated)_
+## C-002 — Tools with side effects during replay _(resolved)_
 - **Problem:** Replaying a run that sent an email or wrote to a database would do it again.
-- **Resolution:** Open. Idea: classify tools as read or write; write tools always come from recorded
-  fixtures during replay.
+- **Resolution:** Resolved in Phase 3, more strictly than planned. During replay *no* tool function
+  runs, read or write: `Tool.invoke` returns the recorded result or raises the recorded error, and a
+  call with no recording stops the replay instead of falling back to the real tool. Tested with a
+  write tool whose call counter must not move (decisions.md D-030).
 
-## C-003 — Tool calls after a fork have no recording _(anticipated)_
+## C-003 — Tool calls after a fork have no recording _(partly resolved)_
 - **Problem:** After a fork the agent may call tools with arguments never seen before, so there is
   nothing recorded to serve back, and calling a real write tool is unsafe.
 - **Resolution:** Open. Plan: every demo agent runs against a deterministic simulated backend
   (in-memory state seeded per task). It can answer new calls realistically and safely.
+- **Update 2026-10-27 (Phase 3):** The demo half is done: `SupportBackend` gives every run its own
+  copy of the seed data, and `refund_payment` writes to it. Still open for Phase 4: a way for
+  customers to register simulators for their own write tools, since forks are when those would
+  run without a recording (D-034).
 
 ## C-004 — Ground truth for Auto-Blame _(anticipated)_
 - **Problem:** To measure whether blame finds the right step we need runs where the faulty step is
@@ -30,7 +39,7 @@ Entries marked _anticipated_ were identified during planning and have not been h
 - **Resolution:** Open. Plan: a seeded failure catalog of deliberately injected bugs, plus
   fork-based verification as a second signal.
 
-## C-005 — Replaying Gemini conversations exactly _(anticipated)_
+## C-005 — Replaying Gemini conversations exactly _(resolved)_
 - **Problem:** Gemini responses can carry thinking and function-call parts that must go back to the
   model unchanged on the next turn. If a replay or fork rebuilds the history slightly differently,
   the live steps after a fork see a different conversation than the original did.
@@ -42,6 +51,11 @@ Entries marked _anticipated_ were identified during planning and have not been h
 - **Update 2026-10-27 (Phase 1):** Recordings now hold the exact request and the raw response in
   JSON mode. A test checks that a binary `thought_signature` survives storage and decodes back to
   the same bytes. Remaining: replaying from the recordings (Phase 3).
+- **Resolved 2026-10-27 (Phase 3):** Replays rebuild each response from its recording
+  (`GenerateContentResponse.model_validate`), the loop resends that raw content, and the next
+  request's hash matches the recorded one. A test checks this with thinking parts and a binary
+  signature. Live Flash-Lite responses carried a `thought_signature` on every call, and those runs
+  replayed identically.
 
 ## C-006 — Gemini model IDs not yet confirmed _(resolved)_
 - **Problem:** Sources disagreed on the current Flash and Flash-Lite IDs. The defaults
@@ -120,4 +134,23 @@ Entries marked _anticipated_ were identified during planning and have not been h
   showed blank messages for the customer example.
 - **Resolution:** `store.run_message` and `store.run_answer` read both shapes: the first text
   argument and the plain return value. A test covers it.
+
+## C-016 — A tool result changed after it was returned _(resolved)_
+- **Problem:** The first live run with the refund tool ended with a false claim: *"P-902 was
+  already marked as refunded! However… I've processed another refund."* It looked like a model
+  hallucination. Replaying the run diverged at
+  `$.contents[2].parts[1].function_response.response.payments[1].status`: the step-1
+  `get_payments` result inside the step-3 request.
+- **Cause:**
+  - `get_payments` returned the backend's own payment dicts, and the loop kept that same object in
+    its message history.
+  - When `refund_payment` set P-902 to `refunded`, it also rewrote the *earlier* tool result.
+  - So at step 3 the model was shown a history in which P-902 was refunded before it acted. It
+    reported what it saw.
+  - The recording, serialised at call time, still held the true value, so the replay noticed.
+- **Resolution:** `Tool.invoke` returns a deep copy of every result (D-035), and a test checks that
+  later writes can't change an earlier result. Rerun live, the agent answered correctly, and its
+  replay was identical.
+- **Lesson:** The fidelity check found a bug in *our* code that looked like a model failure. Without
+  replay it would have been logged as a hallucination.
 

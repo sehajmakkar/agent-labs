@@ -108,3 +108,37 @@ def test_runs_from_lab_agent_show_their_question_and_answer(client):
     answer("Rain in Pune?")
     (run,) = client.get("/api/runs").json()
     assert (run["message"], run["answer"]) == ("Rain in Pune?", "Take an umbrella.")
+
+
+def test_replay_endpoint_replays_a_demo_run_offline(client, store):
+    from fakes import fake_genai, gemini_response
+
+    from agentlab.demo.support import AGENT as support
+    from agentlab.llm.gemini import GeminiClient, wrap_genai_client
+    from agentlab.loop import run_agent
+
+    llm = GeminiClient(client=wrap_genai_client(fake_genai(gemini_response([{"text": "Hi!"}]))))
+    source = run_agent(support, llm=llm, model="m", user_message="hello").run_id
+
+    response = client.post(f"/api/runs/{source}/replay").json()
+    assert response["identical"] is True
+
+    detail = client.get(f"/api/runs/{source}").json()
+    assert [r["id"] for r in detail["replays"]] == [response["run_id"]]
+    replay = client.get(f"/api/runs/{response['run_id']}").json()["run"]
+    assert (replay["mode"], replay["parent_run_id"]) == ("replay", source)
+    assert replay["replay_report"]["identical"] is True
+
+
+def test_replaying_a_custom_agent_needs_its_code(client):
+    import agentlab as lab
+
+    @lab.agent("custom")
+    def custom(message: str) -> str:
+        return "ok"
+
+    custom("hi")
+    run_id = client.get("/api/runs").json()[0]["id"]
+    response = client.post(f"/api/runs/{run_id}/replay")
+    assert response.status_code == 400
+    assert "--entry" in response.json()["detail"]

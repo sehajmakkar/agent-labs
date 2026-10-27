@@ -57,7 +57,10 @@ around it.
   - `loop.py`: the agent loop (steps, retries, run time limit).
   - `tools.py`: `@tool`; every tool call is traced and recorded.
   - `tracing.py`: spans, runs, context propagation, `@agent`, `init()`.
-  - `store.py`: SQLite tables (runs, spans, recordings).
+  - `store.py`: SQLite tables (runs, spans, recordings, eval runs and results); an additive
+    migration adds new columns on startup (D-031).
+  - `replay/`: the replay session (record/replay by request hash), fidelity check, and runner.
+  - `determinism.py`: `lab.now()`, `lab.monotonic()`, `lab.random()`, which are replayable.
   - `semconv.py`: span attribute names (OTel GenAI v1.41.0 plus our `agentlab.*`).
   - `llm/`: neutral types, the Gemini adapter, `wrap_genai_client` (the model-call boundary) and
     `ratelimit.py`.
@@ -84,14 +87,20 @@ uv run lab runs                           # recent runs
 uv run lab show <run-id-prefix>           # a saved run's tree
 uv run lab eval datasets/support.jsonl datasets/triage.jsonl   # score 20 tasks (needs API key)
 uv run lab evals / lab report <id>        # past eval runs
+uv run lab replay <run-id> [--entry FILE.py:FUNCTION]   # offline replay + fidelity (no API key needed)
+uv run lab fidelity                       # replay recent demo runs, share that reproduce exactly
 (cd ui && npm install && npm run build && npm test)   # UI build and layout tests
 uv run lab ui                             # API + UI on http://127.0.0.1:8000 (Vite dev: cd ui && npm run dev)
 ```
 
 `AGENTLAB_RPM` (default 15, the free-tier limit) caps Gemini requests per minute (D-026).
 
-Runs are saved to `.agentlab/lab.db` (git-ignored). There are no migrations (D-020): after a schema
-change, delete that file.
+Runs are saved to `.agentlab/lab.db` (git-ignored). New nullable columns are added automatically
+(D-031); renames or type changes still mean deleting that file.
+
+Replay rules (D-030 to D-035): any new source of nondeterminism in agent code must go through an
+interceptor (`lab.now()`, `lab.random()`, a wrapped client or `@tool`). Tool results are deep-copied
+snapshots. During replay no tool or model is ever called.
 
 ## Current status
 
@@ -105,7 +114,11 @@ change, delete that file.
   categories, a concurrent batch runner, metrics, the triage agent, a rate limiter, a FastAPI API,
   and the React UI (run list, eval report, decision tree, inspector). 64 Python tests and 5 UI
   tests; verified live.
-- Next: Phase 3 (deterministic replay). See the checklist in PLAN.md.
+- **Phase 3 done** (2026-10-27): deterministic replay at both boundaries plus the clock and
+  randomness, recorded failures, a fidelity check, `lab replay` / `lab fidelity`, a Replay button
+  in the UI, and the support agent's `refund_payment` write tool on a per-run simulated backend.
+  79 Python tests; verified offline on real runs.
+- Next: Phase 4 (Fork & Replay). See the checklist in PLAN.md.
 - Stack accepted (D-003 to D-006, D-011):
   - Python 3.12 with uv, FastAPI, SQLite/SQLModel, React + React Flow.
   - Our own agent loop with interception at the LLM client and tool functions. No LangGraph in the

@@ -8,10 +8,14 @@ import { navigate, useLoad } from "../lib/hooks";
 export function Runs() {
   const [agent, setAgent] = useState("");
   const [failedOnly, setFailedOnly] = useState(false);
+  const [showReplays, setShowReplays] = useState(false);
   const runs = useLoad(() => api.runs(), "runs");
 
   const rows = (runs.data ?? []).filter(
-    (r) => (!agent || r.agent_name === agent) && (!failedOnly || isFailure(r)),
+    (r) =>
+      (!agent || r.agent_name === agent) &&
+      (!failedOnly || isFailure(r)) &&
+      (showReplays || r.mode !== "replay"),
   );
   const agents = [...new Set((runs.data ?? []).map((r) => r.agent_name))].sort();
 
@@ -33,6 +37,14 @@ export function Runs() {
               onChange={(e) => setFailedOnly(e.target.checked)}
             />
             Failures only
+          </label>
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={showReplays}
+              onChange={(e) => setShowReplays(e.target.checked)}
+            />
+            Show replays
           </label>
           <button onClick={runs.reload}>Refresh</button>
         </div>
@@ -82,5 +94,6 @@ export function Runs() {
 }
 
 function isFailure(run: RunSummary): boolean {
+  if (run.mode === "replay") return !run.replay_report?.identical;
   return run.eval ? !run.eval.passed : run.status !== "completed";
 }

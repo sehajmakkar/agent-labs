@@ -19,8 +19,8 @@ Sizes are relative (S / M / L), not calendar estimates.
 | 0 | Setup and a first agent | ✅ Done |
 | 1 | Tracing SDK and trace store | ✅ Done |
 | 2 | Evals and the decision tree UI | ✅ Done |
-| 3 | Deterministic replay | ⏭️ Next |
-| 4 | Fork & Replay | ⬜ Not started |
+| 3 | Deterministic replay | ✅ Done |
+| 4 | Fork & Replay | ⏭️ Next |
 | 5 | Trajectory Diff | ⬜ Not started |
 | 6 | Auto-Blame | ⬜ Not started |
 | 7 | Experiments, regressions and CI gate | ⬜ Not started |
@@ -327,22 +327,93 @@ and let someone see a failure instead of reading logs?
 - In the tree, step and agent nodes show wall time, including rate-limit waiting. The header and
   the eval metrics leave that wait out. Waits are recorded per run, not per step.
 
-### Phase 3 — Deterministic replay · M · ⏭️ Next
+### Phase 3 — Deterministic replay · M · ✅ Done
 
-- [ ] Interceptor *replay* mode
-- [ ] Request hashing to match each call to its recording
-- [ ] Tool simulator with read/write classification; writes never reach anything real (C-002, C-003)
-- [ ] Support agent gains write tools (refund) against the simulator
-- [ ] Clock and random seeding
-- [ ] Gemini thinking and function-call parts replayed byte-for-byte (C-005)
-- [ ] **Replay fidelity** check: replayed tree == original tree
-- [ ] **Demo:** replay a recorded run with the network off; identical tree, zero API cost
-- [ ] **Learnings** written up
+- [x] Interceptor *replay* mode at both boundaries: the wrapped model client and `Tool.invoke` (`replay/session.py`, D-030)
+- [x] Request hashing to match each call to its recording; same-hash calls served in order; a divergence names the differing JSON paths
+- [x] Read/write tools: during replay no tool runs at all, so writes can never repeat (C-002)
+- [x] Tool simulator: a per-run simulated backend for the support agent (`SupportBackend`, C-003, D-034)
+- [x] Support agent gains a write tool, `refund_payment`, with a refund policy; eval tasks guard against refunds that shouldn't happen (13 support tasks, 21 in total)
+- [x] Clock and randomness: `lab.now()`, `lab.monotonic()`, `lab.random()` are recorded and replayed; the loop's timeout uses them (D-033)
+- [x] Failed calls recorded, so retries replay identically; run limits stored on the run (D-032)
+- [x] Gemini thinking and function-call parts replayed byte for byte, verified on live Flash-Lite responses with thought signatures (C-005)
+- [x] **Replay fidelity** check: replayed tree == original tree (`replay/fidelity.py`), `lab replay`, `lab fidelity`
+- [x] Replaying a customer's own agent: `lab replay <run> --entry FILE.py:FUNCTION`
+- [x] UI: Replay button, replay badge and report, "↺ recorded" on served spans; `POST /api/runs/{id}/replay` (D-036)
+- [x] Tool results are snapshots (C-016, D-035), a bug found by the fidelity check
+- [x] **Demo:** replay a recorded run with the network off; identical tree, zero API cost. With no API key set: a refund run replayed to 10 identical spans at $0.000000, and the ALR-999 failure replayed to 15 identical spans. `lab fidelity`: 14/14 triage runs from Phase 2 identical; 16/16 support runs diverge at `$.config.system_instruction`, because that agent changed. All 13 support eval runs recorded with Phase 3 code (12/13 passing) replayed identically: **13/13, 100%**.
+- [x] **Learnings** written up
+- Moved: a simulator hook for customers' own write tools → Phase 4, where forks first run write tools without a recording (D-034).
 - **Learn:** determinism, the record/replay ("VCR") pattern, content hashing, idempotency, side
 effects.
 - **Pitch:** a strong engineering talking point; still invisible to non-engineers.
 
-### Phase 4 — Fork & Replay · L · *first pitchable demo*
+#### How we built it
+
+**The question:** can a recorded run be re-run exactly, offline and for free, so that later a fork
+can change *one* thing and everything else stays the same?
+
+1. **Replay re-executes the agent's code, not the trace** (D-030).
+   - The same agent code runs again.
+   - At each boundary (the wrapped Gemini client, `Tool.invoke`, `lab.now()`), the call checks for
+     an active `ReplaySession` (a `ContextVar`, like the current span). If one is active, the call
+     asks the session for the response instead of making the real call.
+   - Nothing else in the agent knows that a replay is happening. That is the payoff of
+     intercepting at the boundaries since Phase 0.
+2. **Matching by content hash.**
+   - Each request is canonical JSON (sorted keys) hashed with SHA-256, so the same request always
+     gives the same hash.
+   - Recordings with the same hash form a FIFO queue in recording order, so retries and repeated
+     questions replay in the right order.
+   - A miss raises `ReplayDivergence`. It diffs the new request against the next unused recording
+     (a recursive JSON diff) and reports paths like `$.config.system_instruction`.
+3. **Everything nondeterministic is recorded.**
+   - Model responses (with thought signatures as base64) and tool results.
+   - Failures too: an API error is stored with its code and details and raised again on replay
+     (D-032).
+   - Clock and random reads, through `lab.now()`, `lab.monotonic()` and `lab.random()`, so a
+     timed-out run replays as a timeout at the same step (D-033).
+   - The loop's limits (max steps, timeout, retry limit) are stored on the root span, so the
+     replay uses the same ones.
+4. **Side effects are impossible during replay.** No tool function runs; `Tool.invoke` returns the
+   recorded output or raises the recorded error. For runs of the demo agents, the replay's Gemini
+   client wraps a stub that raises if it is ever called, so "no network" is enforced, not just
+   claimed.
+5. **The fidelity check.** Both runs' spans are reduced to what the agent decided (tree position,
+   status, tool arguments and results, model outputs, tokens, answer) and compared node by node;
+   IDs, times and cost are ignored. `lab fidelity` replays recent runs and reports the share that
+   reproduce exactly.
+6. **A simulated backend for the write tool.** `refund_payment` mutates a per-run copy of the seed
+   data, held in a `ContextVar` and keyed by run ID, so parallel eval threads and repeated runs
+   never share state (D-034).
+7. **The fidelity check found a real bug** (C-016).
+   - The first live refund run ended with a "hallucination". Its replay diverged inside an
+     *earlier* tool result: `get_payments` had returned live backend objects, so the later refund
+     rewrote history the model was shown.
+   - Fix: deep-copy every tool result at the boundary (D-035). Rerun live, the answer was correct
+     and the replay identical.
+8. **Data kept across schema changes.** A small additive migration adds new columns to an
+   existing SQLite database on startup (D-031), so the 56 runs from Phases 1–2 survived and became
+   the fidelity test set.
+9. **Verified:**
+   - 79 Python tests: record→replay identical; tools never re-run; recorded tool errors re-raised
+     verbatim; thought signatures byte for byte; retries; divergence paths; timeouts from the
+     recorded clock; a customer `@lab.agent` entry point; the migration; the replay endpoint.
+   - Live replays with `GEMINI_API_KEY` unset.
+   - `lab fidelity` over 30 real runs.
+   - UI screenshots of an identical replay and a diverged one.
+   - The changed support dataset re-evaluated live.
+
+**Not done yet, and worth saying in an interview:**
+- Replay is strict: any code change diverges at the first changed call. Live fallback after a
+  chosen point is Phase 4's fork.
+- Only calls through the SDK are replayable. An agent that calls `datetime.now()` or an HTTP API
+  directly isn't, and nothing detects that automatically.
+- Old runs replay with caveats: no clock recordings (live time is used and reported), and no
+  failed-attempt recordings.
+- Customers can't yet register simulators for their own write tools (Phase 4).
+
+### Phase 4 — Fork & Replay · L · *first pitchable demo* · ⏭️ Next
 
 - [ ] "Fork from here" on any node (API and UI)
 - [ ] Override editor: change the prompt, the model, or a tool's output
@@ -352,6 +423,7 @@ effects.
 - [ ] UI: the run family shown as a tree
 - [ ] `lab worker`: runs fork jobs inside the user's repo (D-009)
 - [ ] HTTP trace ingestion: the SDK can send runs to a lab server instead of local SQLite (D-027)
+- [ ] Simulators for customers' own write tools, used when a fork runs a write tool without a recording (D-034)
 - [ ] **Demo:** a failed support run, forked at the bad step with a fix, now passes 5/5
 - [ ] **Learnings** written up
 - [ ] **Start Tier 1 outreach**
