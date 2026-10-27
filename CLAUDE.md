@@ -36,9 +36,16 @@ around it.
   editing them.
 - **learnings.md** — concepts learned while building, written so the author can revise from it later.
 - **challenges.md** — problems hit, what was tried, how it was solved (or that it is still open).
+- **WALKTHROUGH.md**: the author's reading guide (D-021). At the end of every phase:
+  - put new files into the reading order, with ★ ratings;
+  - update the end-to-end flow and the line references;
+  - add a "Phase N recap" with experiments to try.
 - Update these files in the same change that causes the entry, not afterwards.
 - Work in phases from [PLAN.md](PLAN.md). Each phase must end in something demoable, with its
   learnings written up. Update PLAN.md if scope changes, and record why in decisions.md.
+- **Every finished phase in PLAN.md gets a "How we built it" section.** It covers the engineering
+  approach, the patterns used, how it was verified, and the known gaps. Write it so the author can
+  retell it in a technical interview.
 - **PLAN.md is a checklist.** Tick `[x]` an item as soon as it is done and verified, and keep the
   Progress table at the top in sync. Never tick something that wasn't actually run or tested.
 - Ask before choosing between options that change scope or architecture; record the answer in

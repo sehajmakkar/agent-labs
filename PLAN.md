@@ -111,6 +111,45 @@ give every later feature *ground truth*: we know which step is really at fault.
 model call), tool and function calling.
 - **Pitch:** none yet.
 
+#### How we built it
+
+**The approach:** build the smallest agent that works, before tracing anything. You can't design
+a recorder until you know what an agent actually does.
+
+1. **A Python package from day one.**
+   - `pyproject.toml` is the package's ID card: its name (`agentlab`), version, dependencies, and a
+     console command (`lab = "agentlab.cli:main"`, which is why `lab` works in a terminal).
+   - `hatchling`, the build backend, turns the code into a **wheel**: a zip file that `pip` or
+     `uv` installs into any project.
+   - `uv` manages the virtual environment, and `uv.lock` pins every dependency version so installs
+     are repeatable.
+   - The code lives in `src/agentlab/`. Tests import the *installed* package, as a customer would,
+     not loose files that happen to be nearby (D-011).
+2. **Our own types first** (`llm/base.py`).
+   - `Message`, `ToolCall`, `ToolResult` and `Usage` are plain dataclasses, and the loop speaks only
+     these. Gemini's SDK is hidden behind an **adapter** (`GeminiClient`) that translates both ways.
+     That keeps the loop provider-neutral and lets tests swap in a fake model (D-005, D-012).
+   - `LLMClient` is a `Protocol` (a type defined by its methods, not by inheritance), so any object
+     with a matching `generate()` fits.
+3. **`@tool` by introspection.**
+   - The decorator reads the function's signature and type hints with `inspect` and
+     `get_type_hints`, and builds a pydantic model from them with `create_model`.
+   - That model provides both the JSON Schema sent to the model and the validation of the
+     arguments the model sends back. FastAPI uses the same trick for request bodies.
+   - Developers write an ordinary typed function and never write a schema by hand.
+4. **The loop.** Call the model. If it asked for tools, run them, append the results and go round
+   again; otherwise return its text. A tool error is returned to the model as data, never raised
+   (D-013).
+5. **Read the real SDK, not memory.** The `google-genai` 2.33 types decided the details:
+   - function calls carry an `id`;
+   - tool results go back as `function_response` parts;
+   - automatic function calling is turned off;
+   - responses carry thought signatures, which is why `raw` exists (C-005).
+6. **Tests before live calls, then live verification.**
+   - `ScriptedLLM` replays prewritten model replies, so the loop is tested offline.
+   - `lab models` confirmed the real model IDs (C-006), and live runs on Flash-Lite confirmed the
+     whole path.
+
 ### Phase 1 — Tracing SDK and trace store · M · ✅ Done
 
 - [x] Run and Span models, with attribute names from the OTel GenAI conventions v1.41.0 (`semconv.py`)
@@ -128,6 +167,65 @@ model call), tool and function calling.
 - **Learn:** traces vs. spans vs. logs, parent/child context, OTel GenAI conventions, token
 accounting and cost calculation.
 - **Pitch:** none yet. This is the foundation.
+
+#### How we built it
+
+**The question:** how do we see every model call and tool call an agent makes, without changing
+how the customer writes their agent?
+
+1. **Studied how existing tools plug in** (learnings.md, "Three integration patterns"):
+   - wrapping the model client;
+   - decorators on the customer's functions;
+   - OpenTelemetry auto-instrumentation, which patches libraries at import time.
+
+   We chose a client wrapper plus decorators. It is explicit, needs no monkeypatching, and costs
+   the customer about three lines (D-016).
+2. **Data model before code:**
+   - a run is one execution;
+   - a span is one timed unit of work, with a parent, so spans form a tree;
+   - a recording is the exact request and response of one call.
+
+   The model and the attribute names (`gen_ai.*`) were borrowed from the OpenTelemetry GenAI
+   conventions, read from the spec and pinned to v1.41.0, so traces can later be exported to
+   standard tools (D-006).
+3. **Context propagation with `ContextVar`.** The span currently open is stored in a context
+   variable, and each new span makes it its parent. Nobody passes a parent through the customer's
+   code. OpenTelemetry's Python SDK does the same, and it also works with threads and async code.
+4. **The interceptor is a proxy object.**
+   - `TracedGenAIClient` has the same shape as `genai.Client`
+     (`client.models.generate_content(...)`). It intercepts that one method, which opens a `chat`
+     span, makes the real call and records it, and passes every other method through with
+     `__getattr__`.
+   - The customer changes one line: `client = lab.wrap(genai.Client())`.
+   - Tools record themselves inside `Tool.invoke`, so a call is traced whether our loop or the
+     customer's code makes it.
+5. **Recordings built for replay.** Each request is serialised as canonical JSON (sorted keys) and
+   hashed with SHA-256, so Phase 3 can find "this exact call" again. Bytes such as thought
+   signatures are stored as base64 and survive the round trip; a test checks this.
+6. **Storage: SQLite via SQLModel**, in a local file. There's no server to run, and the schema is
+   readable with `sqlite3`.
+   - Spans are written when they end, so a `seq` number keeps their start order (C-008).
+   - Times are stored in UTC and shown in local time (C-009).
+7. **Safe to import into someone else's app.**
+   - Until `lab.init()` is called, tracing is a no-op (D-018).
+   - Retries are ours (backoff with jitter, with the SDK's own retries switched off), so every
+     attempt is visible (D-017).
+   - Errors are recorded and then re-raised, never swallowed.
+8. **A small public API.** `agentlab/__init__.py` exports four things: `lab.init`, `lab.wrap`,
+   `@lab.tool` and `@lab.agent`. Everything else is internal and can change.
+9. **Verified like a customer would use it:**
+   - 30 offline tests, using a fake `genai` client and `ScriptedLLM`;
+   - a live run on Flash-Lite;
+   - a forced 404, to check that failures are saved correctly;
+   - the wheel built (`uv build`), installed into a fresh virtualenv, and confirmed that
+     `import agentlab` and `lab --help` work.
+
+**Not done yet, and worth saying in an interview:**
+- Traces go to a SQLite file on the customer's machine. Sending them to a lab server over HTTP
+  comes with the FastAPI server in Phase 2.
+- The package isn't on PyPI, and the name `agentlab` is already taken there.
+- The wheel also ships the demo `agents/` package, which clashes with the OpenAI Agents SDK
+  (C-011).
 
 ### Phase 2 — Evals and the decision tree UI · M–L · *parity milestone* · ⏭️ Next
 

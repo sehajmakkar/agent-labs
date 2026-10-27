@@ -199,3 +199,36 @@ The same message ("Was I charged twice for order 4417?") ran in **2 steps** in P
 called in parallel) and in **3 steps** in Phase 1 (`get_payments`, then `get_order`, then the
 answer). Both answers were right. That is the nondeterminism from C-001, seen for real: one run
 proves little, which is why forks run N times and why Trajectory Diff exists.
+
+## 2026-10-27 — What an SDK is, and how ours ships
+
+### An SDK is a library with a small, stable surface
+"SDK" sounds bigger than it is. Ours is a Python package that a customer installs and imports.
+What makes it an SDK rather than a pile of code is the **public surface**: the few names
+customers are meant to use (`lab.init`, `lab.wrap`, `@lab.tool`, `@lab.agent`, exported from
+`agentlab/__init__.py`). Everything else is internal and free to change. Keeping that surface
+small is what lets a library evolve without breaking its users.
+
+### How a Python package gets from here to a customer
+1. `pyproject.toml` declares the name, version, dependencies and console commands.
+2. A build backend (hatchling) runs `uv build` and produces a **wheel** (`.whl`), a zip file of
+   the code plus metadata, and a source archive (`.tar.gz`).
+3. A customer installs it with `pip install <wheel>` or straight from git
+   (`uv add git+https://github.com/<owner>/<repo>`). Once it's published, a plain
+   `pip install <name>` works.
+4. `[project.scripts]` creates the `lab` command at install time; it calls `agentlab.cli:main`.
+
+We built the wheel and installed it into an empty virtualenv: `import agentlab` and `lab --help`
+both worked. Listing the wheel's contents is how C-011 was found. Look inside what you ship.
+
+### Patterns an SDK like this relies on
+- **Proxy / wrapper:** an object with the same shape as the real client that intercepts one
+  method and forwards the rest (`__getattr__`). The customer swaps one line.
+- **Decorator:** wraps a function to add behaviour (tracing, schema building) without changing
+  how it's written or called.
+- **Adapter:** translates between our neutral types and a provider's SDK, so the core never
+  depends on one provider.
+- **No-op by default:** importing the library does nothing until `init()`, so adding it to an
+  app is safe.
+- **Context propagation:** `ContextVar` holds "the current span", so nesting works without
+  passing anything around.

@@ -77,3 +77,13 @@ Entries marked _anticipated_ were identified during planning and have not been h
   full. A run with N steps stores about N²/2 turns of history.
 - **Resolution:** Accepted at demo scale (decisions.md D-016). If it matters, store each turn once
   and have recordings point to the turns.
+
+## C-011 — The wheel ships a top-level `agents` package _(open)_
+- **Problem:** `pyproject.toml` packages both `src/agentlab` and the demo `agents/`, so
+  installing our wheel also installs a top-level `agents` module. The OpenAI Agents SDK
+  (`openai-agents` on PyPI) installs a package with the same name, so a customer using both
+  would get one overwriting the other. Found by building the wheel and listing its contents.
+- **Also:** the name `agentlab` is already taken on PyPI, so publishing will need another name
+  (`agent-reliability-lab` was free on 2026-10-27).
+- **Resolution:** not fixed yet. Options: move the demo agents to `agentlab.demo`, or keep them
+  out of the wheel and load them only from the repo. Decide before anything is published.

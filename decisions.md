@@ -388,3 +388,22 @@ entry's status line.
   `.agentlab/lab.db` (losing local runs) or adding a migration tool such as Alembic at that point.
 - **Rationale:** Adding the known Phase 4 columns now avoids the first migration. A migration tool
   would be one more thing to learn before it is needed.
+
+## D-021 — A reading guide, updated every phase
+
+- **Date:** 2026-10-27
+- **Status:** Accepted (raised by the author)
+- **Context:** Claude writes most of the code, and the author kept losing track of how the files
+  fit together. learnings.md explains concepts but not the order in which to read the code.
+- **Decision:** [WALKTHROUGH.md](WALKTHROUGH.md) holds:
+  - a dependency-ordered reading list of every file, with importance ratings;
+  - the end-to-end flow of one run;
+  - deep dives on tool calling and tracing;
+  - interview prep and a review routine.
+  It is updated at the end of every phase, and each phase gets a short recap with experiments to
+  try.
+- **Trade-offs:** One more document to keep in sync, and line references in it go stale as code
+  changes. We accept that because the author can't explain a demo they haven't read in order. The
+  file is checked at each phase end.
+- **Rationale:** Learning is the first goal (CLAUDE.md). Reading files in dependency order is the
+  fastest way to understand code someone else wrote.
