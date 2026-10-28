@@ -3,12 +3,15 @@ import { useCallback, useEffect, useState } from "react";
 // A tiny hash router: "#/runs/abc" → { page: "run", id: "abc" }. Hash URLs need no server
 // routing, so the FastAPI app only has to serve index.html.
 export type Route =
+  | { page: "home" }
   | { page: "runs" }
   | { page: "run"; id: string; span?: string; fork?: boolean }
   | { page: "evals" }
   | { page: "eval"; id: string }
   | { page: "fork"; id: string }
-  | { page: "diff"; a: string; b: string };
+  | { page: "diff"; a: string; b: string }
+  | { page: "blame"; id: string }
+  | { page: "blame-bench" };
 
 function parse(hash: string): Route {
   const [path, query = ""] = hash.replace(/^#/, "").split("?");
@@ -21,8 +24,11 @@ function parse(hash: string): Route {
   if (parts[0] === "evals" && parts[1]) return { page: "eval", id: parts[1] };
   if (parts[0] === "forks" && parts[1]) return { page: "fork", id: parts[1] };
   if (parts[0] === "diff" && parts[1] && parts[2]) return { page: "diff", a: parts[1], b: parts[2] };
+  if (parts[0] === "blames" && parts[1]) return { page: "blame", id: parts[1] };
+  if (parts[0] === "blame-bench") return { page: "blame-bench" };
   if (parts[0] === "evals") return { page: "evals" };
-  return { page: "runs" };
+  if (parts[0] === "runs") return { page: "runs" };
+  return { page: "home" };
 }
 
 export function useRoute(): Route {

@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 
 import { api, type Recording, type RunSummary, type Span } from "../api";
 import { money, tokens } from "../lib/format";
+import { useAction } from "../lib/config";
 import { useLoad } from "../lib/hooks";
 import { ForkDialog } from "./ForkDialog";
 
@@ -20,6 +21,7 @@ export function Inspector({
   onClose: () => void;
 }) {
   const [forking, setForking] = useState(openFork);
+  const forkAction = useAction("fork");
   const forkable = span.kind !== "agent" && run.mode !== "replay";
   const recordings = useLoad(
     () => (span.kind === "llm" || span.kind === "tool" ? api.recordings(span.id) : Promise.resolve([])),
@@ -48,7 +50,12 @@ export function Inspector({
       </header>
 
       {forkable && (
-        <button className="fork-button" onClick={() => setForking(true)}>
+        <button
+          className="fork-button"
+          onClick={() => setForking(true)}
+          disabled={!forkAction.allowed}
+          title={forkAction.why ?? "Re-run from here with one change, against a control"}
+        >
           ⑂ Fork from here
         </button>
       )}

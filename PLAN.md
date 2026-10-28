@@ -22,10 +22,10 @@ Sizes are relative (S / M / L), not calendar estimates.
 | 3 | Deterministic replay | ✅ Done |
 | 4 | Fork & Replay | ✅ Done |
 | 5 | Trajectory Diff | ✅ Done |
-| 6 | Auto-Blame | ⏭️ Next |
-| 7 | Experiments, regressions and CI gate | ⬜ Not started |
-| 8 | Chaos testing *(stretch)* | ⬜ Not started |
-| 9 | Pitch kit | ⬜ Not started |
+| 6 | Auto-Blame | ✅ Done |
+| 7 | Lock it in: regression tests and CI gate (cut down, D-053) | ✅ Done |
+| 8 | Chaos testing *(stretch)* | ⏸️ Deferred until after the pitch (D-053) |
+| 9 | Pitch kit | 🟡 Built; your steps left (deploy, record, send) |
 
 ---
 
@@ -551,32 +551,119 @@ and what did that cost?
 - Diffs compare two runs. Comparing whole experiments (all of one model's runs against all of
   another's) is Phase 7.
 
-### Phase 6 — Auto-Blame · L · *headline differentiator* · ⏭️ Next
+### Phase 6 — Auto-Blame · L · *headline differentiator* · ✅ Done
 
-- [ ] Seeded failure catalog: known bugs planted on purpose, as ground truth (C-004)
-- [ ] LLM judge ranks candidate "first wrong steps", with reasons
-- [ ] Top-k candidates verified by forking with a corrected step
-- [ ] Report: confirmed blame plus confidence
-- [ ] Blame Accuracy benchmark; compare Flash-Lite and Flash as the judge (D-014)
-- [ ] **Demo:** one click on a failed run → "Step 4 is at fault … verified 5/5", plus the accuracy
-chart on 50 seeded failures
-- [ ] **Learnings** written up
+- [x] Seeded failure catalog: 10 prompt bugs planted on purpose, each with a matcher for its guilty step (`blame/catalog.py`, C-004, D-047); `lab seed-failures` → **50 labelled failures**
+- [x] LLM judge ranks candidate "first wrong steps", with reasons and a correction each (`blame/propose.py`); it sees the agent's system prompt so a correction can override a bad prompt line
+- [x] Top-k candidates verified by forking with the corrected step against a control, then pinned down with a fork one step later: decisive or recoverable (`blame/verify.py`, D-048)
+- [x] Report: confirmed blame plus confidence (high = p < 0.05 and decisive), or "not proved" with the judge's unverified guess (`blame/runner.py`)
+- [x] Blame jobs in the worker queue; `lab blame`; UI: 🔍 Blame button, live report page, ⚑ on the blamed step (D-050)
+- [x] Blame Accuracy benchmark; compare Flash-Lite and Flash as the judge (`blame/bench.py`, `lab blame-bench`, the "Blame accuracy" page, D-049)
+- [x] **Demo:** one click on a failed run → "Step 3 is at fault … verified 5/5". On the real refund-ID failure: **"Step 3 is at fault. Verified: with the correction 5/5 runs pass, without it 0/5 (p = 0.008). It is the last step, so it is decisive."** (high confidence). Accuracy chart on 50 seeded failures: see "How we built it" below.
+- [x] **Learnings** written up
 - **Learn:** failure attribution (research such as the Who&When benchmark), LLM-judge calibration,
 precision and recall at k, the cost trade-off of verifying by replay.
 - **Pitch:** BentoLabs, Sentrial, DrDroid, Galileo, Future AGI. A root cause you have *proved*, not
 just a guess.
 
-### Phase 7 — Experiments, regressions and CI gate · M
+#### How we built it
 
-- [ ] Version comparison: success, cost, latency, regression rate
-- [ ] "Turn this failure into a regression test" (recorded tools frozen as fixtures, expected
-outcome stored)
-- [ ] GitHub Action that fails a PR when the regression rate goes up
-- [ ] **Demo:** a prompt change → CI blocks it because 2 tasks regressed → the diff shows why
-- [ ] **Learnings** written up
+**The question:** given a failed run, which step caused it, and how do we prove that rather than
+guess?
+
+1. **Ground truth first** (D-047).
+   - Real failures aren't labelled, so we planted bugs: 10 bad prompt instructions ("always refund
+     the original payment", "if an alert doesn't exist, quietly investigate another"), each a
+     seeded agent with a matcher that finds the step where the bug shows.
+   - `lab seed-failures` ran them through the normal eval runner. The runs that failed and show
+     the bug became 50 labelled cases.
+   - Two bugs mostly didn't fire: the model trusted strong evidence or a tool's docstring over the
+     bad line (C-020).
+2. **Propose.** A `BlameJudge` reads the run as numbered steps (the Phase 5 step extraction), plus
+   the expected outcome, the failed checks and the agent's system prompt. With structured output
+   it ranks up to 3 candidates, each with reasoning and a *correction* phrased as a prompt rule.
+3. **Verify** (D-048).
+   - For each candidate in order: fork at that step N times with the correction appended to the
+     recorded prompt, next to N controls (Phase 4).
+   - `classify` calls it confirmed (≥ 60% pass and ≥ 50 points over the control), rejected, or
+     inconclusive. The first confirmed candidate wins.
+4. **Pin down.** Fork at step c+1 with the same correction, keeping c's original decision. If that
+   fails, step c was *decisive*; if it passes, *recoverable*: the judge may have blamed too early.
+5. **Report.**
+   - Confidence: high = p < 0.05 and decisive; medium = confirmed on weaker evidence.
+   - Otherwise "not proved", with the judge's guess marked unproven.
+   - Partial reports are saved as the job runs, so the UI fills in live.
+6. **Measure** (D-049).
+   - Proposal accuracy for both judges over all 50 cases: top-1, top-3, within one step, and an
+     "always the last step" baseline.
+   - Full verification on 9 cases, one per bug that fired: verified accuracy, precision and
+     abstention.
+7. **What the first benchmark taught us.**
+   - Without seeing the agent's prompt, the judge named the right step in 8 of 9 sampled cases,
+     but only 4 were *confirmed*. Its corrections were generic advice that lost to the planted
+     instruction they contradicted.
+   - Fix: show the judge the system prompt, and tell it to override the offending line explicitly.
+   - Re-measuring with the improved judge is still to do: the first rerun stalled on a Gemini
+     quota limit (C-022). It is one command (`lab blame-bench --verify 9 -n 3`).
+8. **Verified:**
+   - 122 Python tests: decisive, recoverable, rejected-then-confirmed, no proof, matchers, both
+     benchmarks, the worker, the API, and the judge seeing the prompt.
+   - Live: the refund-ID blame (high confidence), two benchmark runs, and UI screenshots.
+
+**Results on 50 seeded failures:**
+
+| Judge (did not see the prompt) | Top-1 | Top-3 | Within one step | Cost per case |
+|---|---|---|---|---|
+| Flash-Lite | 72% | 78% | 94% | $0.00067 |
+| Flash | 92% | 92% | 100% | $0.0031 |
+| Baseline: always the last step | 30% | | | |
+
+Verified on 9 cases (judge did not see the prompt, N=3): accuracy 44%, **precision 100%**,
+abstained 56%. Every blame that verification confirmed was right; it abstained rather than guess.
+
+**Not done yet, and worth saying in an interview:**
+- Corrections are prompt rules, so a fault that needs a code or tool fix can't be confirmed.
+- The thresholds are hand-picked.
+- N=3 in the benchmark can't reach p < 0.05, so confirmed benchmark blames are "medium".
+- The planted bugs are cleaner than real regressions.
+
+### Phase 7 — Lock it in: regression tests and a CI gate · S (cut down, D-053) · ✅ Done
+
+- [x] "Turn this failure into a regression test": `lab lock-in <run>` / "🔒 Save as regression test" → `datasets/regressions.jsonl`, with the original checks plus a judge check made from the blame's proved correction, and its origin recorded (`evals/regressions.py`, D-052)
+- [x] CI gate: `lab eval … --gate 0.9` exits 1 if the success rate drops below the threshold or any regression test fails (zero tolerance); a GitHub Actions example is in the README
+- [x] Forks keep the recorded system prompt, so fixing the agent doesn't change old forks' controls (D-051, C-021)
+- [x] **Demo:** the blamed refund-ID failure, locked in → `lab eval datasets/regressions.jsonl --gate 0.9` → **GATE FAILED** ("regression … failed again: answer is missing 'RF-1001'") → the proved correction shipped in the support prompt → **GATE PASSED** (exit 0)
+- [x] **Learnings** written up
+- Deferred until after the pitch (D-053): version comparison across whole eval runs (success, cost, latency, pass-to-fail lists); regression tests with recorded tool fixtures (ours run live against the demo backend); a real GitHub Action in this repo.
 - **Learn:** regression testing for nondeterministic systems, flakiness and pass-rate thresholds,
 CI pipelines.
 - **Pitch:** Athina, LangWatch, TestMu AI, CodeAnt AI, Lyzr and UnifyApps (enterprise reliability gates).
+
+#### How we built it
+
+1. **A regression test is just a task** (D-052). `lock_in` copies the failed run's input and the
+   original task's checks into a new task in `datasets/regressions.jsonl`, tagged `regression`.
+   If a blame confirmed a step, it adds one LLM-judge check whose rubric is the proved correction,
+   so the exact failure mode is tested even if the original checks were loose. The task records
+   its origin (run, blame, step, correction), and locking in the same run twice is a no-op.
+2. **The gate is a pure function.** `check_gate(results, tasks, threshold)` fails if the success
+   rate is below the threshold or if any task tagged `regression` failed, with a reason for each.
+   `lab eval --gate` prints the reasons and returns exit code 1, which is all CI needs to block a
+   merge.
+3. **Fixing the agent mustn't rewrite history** (D-051). Before shipping the fix, forks were
+   changed to keep the recorded system prompt for live calls, so a control still means "the run
+   as it happened". A test fixes the prompt in code and checks that a control still fails.
+4. **Verified:**
+   - 127 Python tests (lock-in with and without a blame, no duplicates, the gate's two rules, the
+     API, the pinned prompt).
+   - Live: the gate failed with the bug present and passed after the proved fix shipped. The whole
+     support dataset plus the regression test then ran under the gate: **14/14, GATE PASSED**
+     (the support dataset was 12/13 before the fix; `support-refund-request` now passes too).
+
+**Not done, and worth saying in an interview:**
+- Regression tests call the live model, so one can fail by chance. The fix is to run each N times
+  and gate on its pass rate.
+- No experiment view (v1 vs v2 across all tasks); see the deferred items above.
 
 ### Phase 8 — Chaos testing · M · *stretch, only after Phases 4–6 are solid*
 
@@ -592,15 +679,18 @@ the time"
 injection through tool output.
 - **Pitch:** Composio, Metorial, Cekura, TestMu AI, Portkey, TrueFoundry.
 
-### Phase 9 — Pitch kit · S–M
+### Phase 9 — Pitch kit · S–M · 🟡 In progress (your steps left)
 
-- [ ] Import OTel GenAI traces from other frameworks (view, diff and blame suggestions; no fork)
-- [ ] LangGraph adapter, so LangGraph agents can be forked too
-- [ ] Hosted read-only demo with seeded data
-- [ ] 2-minute video
-- [ ] One-page demo script per Tier 1 company
-- [ ] Technical write-up built from `learnings.md` and `challenges.md`
-- [ ] **Learnings** written up
+- [x] UI made readable for a first-time visitor: an Overview page built from real examples, a calmer run page with tabs and one action row, seeded runs hidden (D-056)
+- [x] Hosting, live (D-054): a Dockerfile (UI + API + worker), `deploy/start.sh`, `lab snapshot` (scanned for keys), Vercel and Netlify configs, guarded hosted mode (`hosting.py`), and DEPLOY.md. Verified in a local container: it seeds itself, is public, the store RPC returns 403, Replay works without a key, Blame is greyed out without one
+- [ ] **Deploy it** (your accounts): the backend on Fly, Render or Railway, then the UI on Vercel or Netlify. Follow DEPLOY.md, then replace `DEMO_URL` in the README
+- [x] 2-minute demo script (`pitch/DEMO_SCRIPT.md`)
+- [ ] **Record the 2-minute video** (yours, from the script)
+- [x] A note per Tier 1 company (`pitch/private/COMPANIES.md`, git-ignored, D-055)
+- [x] Technical write-up (`pitch/WRITEUP.md`)
+- [x] README "What it has shown so far" section with the real numbers
+- [ ] **Send the first Tier 1 messages** (yours)
+- Deferred (D-053): importing OTel GenAI traces from other frameworks; a LangGraph adapter.
 - **Learn:** OTLP ingestion, product storytelling.
 - **Pitch:** everyone. Each message links the demo that fits that company's product.
 

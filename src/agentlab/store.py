@@ -133,6 +133,36 @@ class ForkRow(SQLModel, table=True):
     error: str | None = None
 
 
+class BlameRow(SQLModel, table=True):
+    """A blame job: find and verify the step that made a failed run fail."""
+
+    __tablename__ = "blames"
+
+    id: str = Field(primary_key=True)
+    source_run_id: str = Field(index=True)
+    judge_model: str
+    n: int = 5  # runs per verification fork (and per control)
+    max_candidates: int = 2  # how many of the judge's candidates to verify, at most
+    status: str = "queued"  # queued | running | done | error
+    worker: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    report: Any = Field(default=None, sa_column=Column(JSON))
+    error: str | None = None
+
+
+class BenchmarkRow(SQLModel, table=True):
+    """Results of a benchmark, such as blame accuracy on seeded failures."""
+
+    __tablename__ = "benchmarks"
+
+    id: str = Field(primary_key=True)
+    kind: str = Field(index=True)  # blame
+    created_at: datetime
+    results: Any = Field(default=None, sa_column=Column(JSON))
+
+
 @dataclass
 class RunTotals:
     """Per-run sums over its model calls."""
@@ -396,28 +426,128 @@ class Store:
             return list(session.exec(query))
 
     def claim_fork(self, agent_names: list[str], worker: str) -> ForkRow | None:
-        """Take the oldest queued fork whose agent this worker can run, or None.
+        """Take the oldest queued fork whose agent this worker can run, or None."""
+        return self._claim(ForkRow, agent_names, worker)
+
+    def _claim(self, table: Any, agent_names: list[str], worker: str) -> Any:
+        """Claim the oldest queued job in `table` (forks or blames) for an agent we can run.
 
         Two workers may poll at once, so the claim is a compare-and-set: the UPDATE only succeeds
         while the row is still "queued", and whoever changes it first owns the job.
         """
         with Session(self.engine) as session:
             candidates = session.exec(
-                select(ForkRow.id)
-                .join(RunRow, RunRow.id == ForkRow.source_run_id)
-                .where(ForkRow.status == "queued", RunRow.agent_name.in_(agent_names))
-                .order_by(ForkRow.created_at)
+                select(table.id)
+                .join(RunRow, RunRow.id == table.source_run_id)
+                .where(table.status == "queued", RunRow.agent_name.in_(agent_names))
+                .order_by(table.created_at)
             ).all()
-            for fork_id in candidates:
+            for job_id in candidates:
                 claimed = session.execute(
-                    update(ForkRow)
-                    .where(ForkRow.id == fork_id, ForkRow.status == "queued")
+                    update(table)
+                    .where(table.id == job_id, table.status == "queued")
                     .values(status="running", worker=worker, started_at=datetime.now(UTC))
                 )
                 session.commit()
                 if claimed.rowcount == 1:
-                    return session.get(ForkRow, fork_id)
+                    return session.get(table, job_id)
         return None
+
+    # Blames
+
+    def create_blame(
+        self,
+        *,
+        source_run_id: str,
+        judge_model: str,
+        n: int,
+        max_candidates: int,
+        status: str = "queued",
+        worker: str | None = None,
+    ) -> str:
+        now = datetime.now(UTC)
+        row = BlameRow(
+            id=uuid.uuid4().hex,
+            source_run_id=source_run_id,
+            judge_model=judge_model,
+            n=n,
+            max_candidates=max_candidates,
+            status=status,
+            worker=worker,
+            created_at=now,
+            started_at=now if status == "running" else None,
+        )
+        with Session(self.engine) as session:
+            session.add(row)
+            session.commit()
+            return row.id
+
+    def claim_blame(self, agent_names: list[str], worker: str) -> BlameRow | None:
+        return self._claim(BlameRow, agent_names, worker)
+
+    def get_blame(self, blame_id: str) -> BlameRow | None:
+        with Session(self.engine) as session:
+            return session.get(BlameRow, blame_id)
+
+    def find_blame(self, id_prefix: str) -> BlameRow:
+        return _find_by_prefix(self.engine, BlameRow, id_prefix, "blame")
+
+    def blames_of(self, run_id: str) -> list[BlameRow]:
+        with Session(self.engine) as session:
+            query = (
+                select(BlameRow)
+                .where(BlameRow.source_run_id == run_id)
+                .order_by(BlameRow.created_at.desc())
+            )
+            return list(session.exec(query))
+
+    def update_blame(self, blame_id: str, *, report: Any) -> None:
+        """Save a partial report while the blame is still running, so the UI can show progress."""
+        with Session(self.engine) as session:
+            row = session.get(BlameRow, blame_id)
+            row.report = report
+            session.add(row)
+            session.commit()
+
+    def finish_blame(self, blame_id: str, *, report: Any = None, error: str | None = None) -> None:
+        with Session(self.engine) as session:
+            row = session.get(BlameRow, blame_id)
+            row.status = "error" if error else "done"
+            row.report = report if report is not None else row.report
+            row.error, row.finished_at = error, datetime.now(UTC)
+            session.add(row)
+            session.commit()
+
+    # Benchmarks
+
+    def save_benchmark(self, kind: str, results: Any) -> str:
+        row = BenchmarkRow(
+            id=uuid.uuid4().hex, kind=kind, created_at=datetime.now(UTC), results=results
+        )
+        with Session(self.engine) as session:
+            session.add(row)
+            session.commit()
+            return row.id
+
+    def benchmarks(self, kind: str, limit: int = 10) -> list[BenchmarkRow]:
+        with Session(self.engine) as session:
+            query = (
+                select(BenchmarkRow)
+                .where(BenchmarkRow.kind == kind)
+                .order_by(BenchmarkRow.created_at.desc())
+                .limit(limit)
+            )
+            return list(session.exec(query))
+
+    def latest_benchmark(self, kind: str) -> BenchmarkRow | None:
+        with Session(self.engine) as session:
+            query = (
+                select(BenchmarkRow)
+                .where(BenchmarkRow.kind == kind)
+                .order_by(BenchmarkRow.created_at.desc())
+                .limit(1)
+            )
+            return session.exec(query).first()
 
     def finish_fork(self, fork_id: str, *, summary: Any = None, error: str | None = None) -> None:
         with Session(self.engine) as session:

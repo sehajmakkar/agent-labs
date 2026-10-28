@@ -10,6 +10,20 @@ Most agent tools stop at **"here is what happened."** This project goes further:
 
 The goal is to move beyond agents that *seem* to work toward agents whose reliability can be measured, debugged, and improved in one place.
 
+## What It Has Shown So Far
+
+Everything below was measured on real runs (Gemini Flash-Lite and Flash). See the
+[live demo](DEMO_URL) and the [technical write-up](pitch/WRITEUP.md).
+
+| | Result |
+|---|---|
+| **Blame, one click** | On a failed support run: *"Step 3 is at fault. Verified: with the correction 5/5 runs pass, without it 0/5 (p = 0.008). Decisive."* |
+| **Blame accuracy** | 50 failures from 10 bugs planted on purpose: right step first **92%** (Flash judge) / 72% (Flash-Lite), against a 30% baseline; every blame confirmed by forking was right |
+| **Fork** | Caught a "fix" that looked significant (4/5 vs 0/5) but was the agent inventing IDs; the real fix then went 5/5 vs 0/5 |
+| **Replay** | 13/13 fresh runs replayed identically, offline, at $0; replay also exposed a tool bug that looked like a hallucination |
+| **Diff** | Flash vs Flash-Lite on the same tasks: Flash adds verification steps (7 vs 4) for 5× the cost, with the same outcome |
+| **Lock it in** | A blamed failure became a regression test; the CI gate failed while the bug existed and passed after the proved fix |
+
 ## What Makes It Different
 
 All four features run on one engine: **deterministic replay**. Every model response and tool result is recorded, so any run can be replayed exactly, without calling the model again.
@@ -131,12 +145,37 @@ uv run lab fork <run-id> --step 3 --append-prompt "Always give the refund ID." -
 uv run lab worker --entry app.py:my_agent [--server http://lab:8000]
                               # run fork jobs queued from the UI, with your agent's code
 uv run lab diff <run-a> <run-b>   # align two runs step by step: first divergence, effects
+uv run lab blame <failed-run>    # find the step that made it fail, and prove it by forking
+uv run lab seed-failures && uv run lab blame-bench --verify 9   # blame accuracy on planted bugs
+uv run lab lock-in <failed-run>  # save it as a regression test (datasets/regressions.jsonl)
+uv run lab eval datasets/*.jsonl --gate 0.9   # CI gate: exit 1 if <90% pass or any regression fails
 
 (cd ui && npm install && npm run build)
 uv run lab ui                 # web UI at http://127.0.0.1:8000: runs, evals, decision trees
 
 uv run pytest                 # offline tests, no API key needed
 ```
+
+### In CI
+
+Lock a fixed failure in with `lab lock-in <run>`, then gate every pull request on it:
+
+```yaml
+# .github/workflows/agent-eval.yml
+on: pull_request
+jobs:
+  agent-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv run lab eval datasets/*.jsonl --gate 0.9
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+```
+
+The gate fails if the success rate drops below 90% or if any regression test fails.
 
 ### Evals
 
@@ -156,4 +195,4 @@ The demo datasets include deliberate traps: a prompt injection hidden in an orde
 
 ## Project Status
 
-Early-stage project, built in phases. Done so far: tool-calling agents on Gemini, tracing of every run into a local or remote trace store, evals with programmatic and LLM-judge checks, a web UI with an interactive decision tree, **deterministic replay** (offline, verified span by span against the original run), **Fork & Replay** (rerun from any step with a changed prompt, model or tool result; N runs against a control; Fisher's exact test; fork jobs run by workers in your own repo), and **Trajectory Diff** (two runs aligned step by step, with the first divergence and its effect on outcome, tokens, cost and time). Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.
+Early-stage project, built in phases. Done so far: tool-calling agents on Gemini, tracing of every run into a local or remote trace store, evals with programmatic and LLM-judge checks, a web UI with an interactive decision tree, **deterministic replay** (offline, verified span by span against the original run), **Fork & Replay** (rerun from any step with a changed prompt, model or tool result; N runs against a control; Fisher's exact test; fork jobs run by workers in your own repo), **Trajectory Diff** (two runs aligned step by step, with the first divergence and its effect on outcome, tokens, cost and time), **Auto-Blame** (a judge proposes the first wrong step with a correction; forks against a control confirm it and check whether it was decisive; accuracy is measured on seeded bugs with known guilty steps), and **lock it in** (a blamed failure becomes a regression test, and a CI gate keeps it fixed). Order: runner and tracing → evals and tree view → deterministic replay → Fork → Trajectory Diff → Auto-Blame → regression gates → chaos testing.

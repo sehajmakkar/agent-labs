@@ -8,6 +8,7 @@ export type SpanNodeData = {
   selected: boolean;
   onError: boolean;
   decision?: string; // for steps: what the step decided
+  blamed?: boolean; // the step a verified blame points at
 };
 export type SpanFlowNode = Node<SpanNodeData, "span">;
 
@@ -20,6 +21,7 @@ export function SpanNode({ data }: NodeProps<SpanFlowNode>) {
   if (span.status === "error") classes.push("is-error");
   else if (onError) classes.push("on-error-path");
   if (selected) classes.push("is-selected");
+  if (data.blamed) classes.push("is-blamed");
 
   return (
     <div className={classes.join(" ")}>
@@ -27,6 +29,7 @@ export function SpanNode({ data }: NodeProps<SpanFlowNode>) {
       <div className="span-node-head">
         <span className="kind-badge">{KIND_LABEL[span.kind]}</span>
         <span className="span-title">{title(span)}</span>
+        {data.blamed && <span className="blamed-mark">⚑ blamed</span>}
         {span.status === "error" && <span className="error-mark">✗</span>}
       </div>
       <div className="span-node-body">{data.decision ?? summary(span)}</div>

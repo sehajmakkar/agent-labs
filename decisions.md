@@ -860,3 +860,208 @@ entry's status line.
   we label it rather than hide it.
 - **Rationale:** "Where did it diverge?" is half the question; "and what did that change?" is the
   other half.
+
+## D-047 — Ground truth from seeded prompt bugs, each with a matcher for its guilty step
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (Claude)
+- **Context:** Blame accuracy needs failures whose guilty step is known (C-004).
+- **Options:**
+  - (a) Label real failures by hand.
+  - (b) Plant one wrong *decision* at step k, then let the run continue.
+  - (c) Corrupt a tool's result at step k.
+  - (d) Plant a bad *instruction* in the agent's prompt, such as "always refund the original
+    payment", and find the step where it shows with a matcher.
+- **Decision:** (d). `blame/catalog.py` has 10 bugs across both agents and 10 tasks. Each bug is a
+  seeded agent (`support~refund-original` and so on). `lab seed-failures` runs each one N times
+  through the normal eval runner. A run counts as a test case only if it failed *and* the
+  matcher finds the bug, and the first matching step is the ground truth.
+- **Trade-offs:**
+  - Planted prompt bugs are cleaner than real failures.
+  - Some matchers point at "the answer step" when the real mistake might be judged earlier, for
+    example skipping a lookup. That's why "within one step" is reported too.
+  - A bug that doesn't fire (`voided-is-charged` sometimes passed, because the tool description
+    contradicts it) yields fewer cases.
+  - Why not (b) or (c): a planted decision isn't the model's own tendency, so a control at that
+    step would pass and verification couldn't confirm it; and a corrupted tool result needs the
+    true value to correct it, which a real blame never has.
+  - We accept the trade-offs because prompt bugs make the model go wrong *systematically*, which
+    is what real regressions look like and what fork-based verification can test.
+- **Rationale:** A benchmark is only as good as its ground truth, and this one is known by
+  construction.
+
+## D-048 — Blame = a judge proposes, forks verify, and a second fork pins the step down
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (Claude)
+- **Decision:**
+  1. A `BlameJudge` (structured output) reads the failed run as numbered steps, with the
+     expected outcome and the failed checks. It ranks up to 3 "first wrong steps", each with
+     reasoning and a *correction*: a general rule for the system prompt.
+  2. For each candidate in order (at most `k`), fork at that step N times with the correction
+     appended to the recorded prompt, next to N controls. It is *confirmed* if the corrected forks
+     pass ≥ 60% and beat the control by ≥ 50 points; *rejected* if they pass ≤ 20% or don't beat
+     it; otherwise *inconclusive*. Stop at the first confirmed candidate.
+  3. For the confirmed step c, fork at c+1 with the same correction, keeping c's original
+     decision. If that still fails, c was *decisive* (the run was lost there); if it passes, the
+     mistake was *recoverable* and c may be too early.
+  4. Confidence is *high* when the correction beat the control with p < 0.05 and the step was
+     decisive, and *medium* when it was confirmed with weaker evidence. If nothing is confirmed,
+     there is no blame: the report says "not proved" and gives the judge's best guess as unproven.
+- **Trade-offs:**
+  - About 3N runs per candidate (correction, control, one step later), roughly 30 model calls at
+    N=5.
+  - Corrections are prompt instructions, so a fault that needs a code or tool fix can't be
+    confirmed this way.
+  - The thresholds are hand-picked.
+  - We accept these: abstaining when unproven is worth more than a confident guess, and the
+    recoverable/decisive check catches the commonest judge error, blaming a step too early.
+- **Rationale:** The pitch is "a root cause you have proved". Proposal is cheap and fallible;
+  forking is expensive and causal; together they are both affordable and trustworthy.
+
+## D-049 — The benchmark measures proposals on every case and full verification on a sample
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (Claude)
+- **Decision:** `lab blame-bench` runs:
+  - every judge model (Flash-Lite and Flash) on all seeded failures, reporting top-1, top-3,
+    within-one-step, and a naive baseline (always blame the last step);
+  - with `--verify K`, full blame on K failures sampled round-robin across bugs, reporting
+    verified accuracy, precision (of confirmed blames, the share that were right) and abstention.
+  Results are saved in a `benchmarks` table, and the UI's "Blame accuracy" page charts the latest.
+- **Trade-offs:** Verified numbers come from a smaller sample (cost), so they are noisier. Top-1 on
+  the step number is strict, since two adjacent steps can be defensible. We accept both because
+  proposal accuracy over ~40 cases plus a verified sample over every bug is the best signal
+  affordable at 15 requests per minute, and "within one step" reports the lenient view.
+- **Rationale:** Precision at k and abstention are the numbers that matter for a tool people
+  trust: how often is a confirmed blame wrong?
+
+## D-050 — Blames are jobs in the same queue and worker as forks
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (Claude)
+- **Decision:**
+  - A `blames` table holds blame jobs.
+  - `Store._claim` is now generic (the same compare-and-set for forks and blames).
+  - The worker takes queued forks first, then blames. A blame saves its partial report after the
+    proposal and after each verification, so the UI can show progress.
+- **Trade-offs:** One long blame (about 15 forks) blocks the worker from other jobs meanwhile.
+  We accept this because there is one worker per agent repo at demo scale, and adding workers
+  scales it.
+- **Rationale:** Blame is "forks, chosen by a judge", so it belongs where forks run, with the
+  agent's own code.
+
+## D-051 — Forks keep the recorded system prompt unless the prompt is what they change
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (Claude), before shipping the refund-ID fix to the support agent
+- **Context:** Live calls in a fork used whatever prompt the agent's code sends *today*. Once the
+  proved fix was added to the support prompt, every fork of an old run would quietly get the fix in
+  its *controls* too, so "without the change" would pass, and Blame would stop confirming the very
+  failure it found.
+- **Decision:** `ForkSession` carries the source run's recorded system prompt. Live calls use the
+  override's prompt if it sets one, and otherwise the recorded prompt, never the current code's.
+- **Trade-offs:**
+  - A fork no longer picks up unrelated code changes to the prompt, which is now only possible on
+    purpose, via the override.
+  - Only the first call's prompt is pinned, so an agent that changes its prompt between calls gets
+    the first one throughout.
+  - We accept both: a fork must change exactly one thing (D-037), and keeping demos repeatable
+    after a fix ships is necessary for the pitch.
+- **Rationale:** A counterfactual's baseline is the run as it happened, not the code as it is now.
+
+## D-052 — Lock it in: blamed failures become regression tests, enforced by a CI gate
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (proposed by Claude, approved by the author)
+- **Decision:**
+  - `lab lock-in <run>` (and "🔒 Save as regression test" in the UI) appends a task to
+    `datasets/regressions.jsonl`: the run's input, the original task's checks, plus, if a blame
+    confirmed a step, an LLM-judge check whose rubric is the proved correction. It is tagged
+    `regression` and records its origin (run, blame, step, correction). Running it twice doesn't
+    duplicate it.
+  - `lab eval … --gate 0.9` exits 1 if the success rate is below the threshold *or any* regression
+    test fails (zero tolerance), and 0 otherwise, so CI can block a merge.
+- **Trade-offs:**
+  - The server writes to a file in the repo (fine for a local lab; a hosted lab would store
+    regressions in the database and export them).
+  - A regression test runs the live model, so it can fail by chance; a flaky regression would need
+    N repeats.
+  - The judge check costs a model call per run.
+  - We accept these: a JSONL file is reviewable in a pull request and works with the existing eval
+    runner, and zero tolerance is the point of a regression suite.
+- **Rationale:** It closes the loop the pitch describes: find → blame → prove the fix → never again.
+
+## D-053 — Phase 7 cut to "lock it in"; the rest of Phase 7 and Phase 8 wait until after the pitch
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (the author asked; Claude recommended; the author agreed)
+- **Options:** (a) Build all of Phase 7: experiment comparison, regression detection between eval
+  runs, a CI gate. (b) Build only the slice that completes the demo story, then go to the pitch
+  kit. (c) Stop.
+- **Decision:** (b). Built: regression tests from blamed failures and the CI gate (D-052). Deferred,
+  "if a company asks": experiment-level comparison (two eval runs side by side, pass-to-fail
+  lists), and chaos testing (Phase 8). Next: the pitch kit (Phase 9), with outreach in parallel.
+- **Trade-offs:**
+  - No experiment view for "prompt v1 vs v2 across all tasks", which Braintrust and Langfuse
+    already offer.
+  - We accept it: that's parity, not the differentiator, and the job-search goal is better served
+    by pitching what's built now.
+- **Rationale:** The demo story needed an ending ("and it never comes back"); the rest is breadth.
+
+## D-054 — Hosting: the UI on Vercel or Netlify, the backend in a container, guarded
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (the author chose a live backend on Vercel or Netlify; Claude adapted the
+  plan to what those can run)
+- **Context:** Companies need a link they can open. The author wanted it live, not a static
+  snapshot, and on Vercel or Netlify.
+- **Decision:**
+  - The UI is static on Vercel or Netlify, and proxies `/api/*` to the backend (`ui/vercel.json`,
+    `ui/netlify.toml`), so there is one origin and no CORS.
+  - The backend is one Docker container (FastAPI, the worker thread and SQLite on `/data`) on Fly,
+    Render or Railway. It seeds itself from `deploy/seed.db.gz` (`lab snapshot`) on the first boot.
+  - Hosted mode (`AGENTLAB_PUBLIC=1`, `hosting.py`):
+    - reading and replay are open;
+    - fork and blame need `AGENTLAB_DEMO_KEY` (the `X-Demo-Key` header), with N ≤ 3 and an hourly
+      cap;
+    - lock-in and the store RPC are off unless a worker token is set.
+  - `/api/config` tells the UI what to grey out.
+- **Trade-offs:**
+  - Two services to deploy instead of one.
+  - Without a persistent disk, visitors' forks vanish on restart.
+  - The demo key is a single shared secret.
+  - Why not run everything on Vercel or Netlify: their serverless functions time out in seconds
+    and lose their files, while blames run for minutes and write to a database.
+  - We accept the trade-offs because a link companies can click, which can't drain the Gemini key,
+    matters more than a one-click deploy.
+- **Rationale:** Live where it is free (replay); gated where it costs money (fork, blame).
+
+## D-055 — Per-company pitch notes are git-ignored
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (Claude; the author can change it)
+- **Decision:** `pitch/DEMO_SCRIPT.md` and `pitch/WRITEUP.md` are public; `pitch/private/` (one
+  note per Tier 1 company) is git-ignored.
+- **Trade-offs:** The notes aren't version-controlled or backed up by git. We accept that because a
+  public repo shown to every company shouldn't carry notes comparing it with each of them.
+- **Rationale:** It extends D-010: material that targets specific companies stays out of what they
+  see.
+
+## D-056 — A calmer UI: a home page from real examples, tabs, one row of actions
+
+- **Date:** 2026-10-28
+- **Status:** Accepted (the author asked for a more readable, less chaotic UI)
+- **Decision:**
+  - **Overview** is the front door: the headline, four real numbers, and the loop (record →
+    evaluate → blame → fork → diff → lock in), each linked to a real example picked by
+    `/api/showcase`.
+  - The run page has one title row with its actions, one line of metadata, one banner saying what
+    the run is (blamed failure, replay or fork), and tabs (decision tree, conversation and checks,
+    replays and forks).
+  - The runs list hides seeded-bug runs by default.
+  - A replay that diverged because the prompt changed explains that in plain words.
+- **Trade-offs:** Things are one click further away behind tabs, and the showcase picks examples
+  by rule (it could pick an odd one). We accept these because the first screen is what a busy
+  reviewer judges, and the rules are simple and visible in `server.py`.
+- **Rationale:** A demo is read in 30 seconds; it should tell one story at a time.

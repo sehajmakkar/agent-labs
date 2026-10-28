@@ -5,7 +5,7 @@ covers what has been built, how a run and an eval flow through the code, how too
 and what to show in an interview.
 
 Claude updates this file at the end of every phase: new files go into the reading order, and each
-phase gets a short recap. Last updated: **Phase 5 (2026-10-27)**. For the same project told
+phase gets a short recap. Last updated: **Phase 9 (2026-10-28)**. For the same project told
 as a story, read [STORY.md](STORY.md).
 
 ---
@@ -24,8 +24,14 @@ scores the agents automatically, and a web UI shows any run as a clickable decis
 | 3 | Deterministic replay: any recorded run re-executed offline with every call served from its recordings, and checked span by span; a refund write tool on a per-run simulated backend | `env -u GEMINI_API_KEY uv run lab replay <run-id>`, `uv run lab fidelity` |
 | 4 | Fork & Replay: rerun from any step with a changed prompt, model or tool result, N times next to N controls, scored and compared with Fisher's exact test; fork jobs run by workers, locally or over HTTP | `uv run lab fork <run> --step 3 --append-prompt "…"`, or "⑂ Fork from here" in the UI |
 | 5 | Trajectory Diff: two runs aligned step by step (Needleman–Wunsch), the first divergence in words, downstream effects, and a word-level diff of the answers | `uv run lab diff <run-a> <run-b>`, or "Compare with" on any run |
+| 6 | Auto-Blame: a judge ranks candidate "first wrong steps" with corrections; forks verify them against a control and pin the step down; a seeded-bug benchmark measures accuracy | `uv run lab blame <failed-run>`, or "🔍 Blame" on a failed run; `uv run lab blame-bench` |
 
-**Not built yet:** Auto-Blame (Phase 6), built on fork and diff.
+| 7 | Lock it in (cut down): a blamed failure becomes a regression test; a CI gate fails on a low pass rate or any failed regression; forks keep the recorded prompt | `uv run lab lock-in <run>`, `uv run lab eval datasets/*.jsonl --gate 0.9` |
+
+| 9 | Pitch kit: a calmer UI with an Overview page, a hosted mode with guards, Docker, Vercel and Netlify configs, the demo script and the write-up | DEPLOY.md, `pitch/` |
+
+**Left:** deploying, recording the video and outreach (your steps). Deferred (D-053): experiment
+comparison, chaos testing.
 
 The lab has **two halves**, and the split matters in interviews:
 
@@ -161,7 +167,42 @@ diff_runs(store, A, B)                                                       dif
  └─ effects: outcome (eval result), steps, tokens, cost, time + word_diff(answer A, answer B)
 ```
 
-### 2f. The UI
+### 2f. One blame
+
+Here is what `lab blame 710849a3` does, or the UI's "🔍 Blame" followed by a worker.
+
+```
+execute_blame(store, blame)                                                 blame/runner.py
+ ├─ steps = extract_steps(run)                     the run as numbered steps (Phase 5)
+ ├─ BlameJudge(request, expected, failed checks, steps)                     blame/propose.py
+ │      structured output → up to 3 candidates: {reasoning, step, correction}
+ └─ for each candidate, in rank order (at most k), until one is confirmed:
+      verify_candidate(step c, correction)                                  blame/verify.py
+       ├─ fork at c: prompt + correction ×N   vs   control (no correction) ×N   (Phase 4)
+       │     → confirmed / rejected / inconclusive               (classify: rates and gap)
+       └─ if confirmed: fork at c+1 with the same correction ×N
+             → still fails: c was decisive   ·   passes: c was recoverable
+ report: verdict, confidence (high = p < 0.05 and decisive), every candidate's evidence
+```
+
+Ground truth for measuring it: `lab seed-failures` runs each planted bug (`blame/catalog.py`)
+through the eval runner, and `lab blame-bench` compares the judge's guesses with each bug's known
+guilty step (`blame/bench.py`).
+
+### 2g. Lock it in
+
+```
+lab lock-in <run>       lock_in(store, run)                                  evals/regressions.py
+                          task = original task's input + checks
+                               + Judge(rubric = the blame's proved correction)   (if blamed)
+                          tagged "regression", origin = {run, blame, step, correction}
+                          → appended to datasets/regressions.jsonl (no duplicates)
+lab eval … --gate 0.9   run_eval(…) → check_gate(results, tasks, 0.9)
+                          fails if success rate < 0.9 or any "regression" task failed
+                          → prints the reasons, exit 1 (CI blocks the merge) / exit 0
+```
+
+### 2h. The UI
 
 `uv run lab ui` starts FastAPI (`server.py`), which serves `ui/dist` and the `/api/*` endpoints.
 The Replay button calls `POST /api/runs/<id>/replay`, which runs section 2c and opens the new run.
@@ -179,7 +220,7 @@ browser  #/evals/<id>       → GET /api/evals/<id>             → eval run + r
 ## 3. Reading order
 
 ★★★ means it's core: know it well enough to explain without looking. ★★ means understand what it
-does and why. ★ means skim. The times are for a careful first read. **New or changed in Phase 5**
+does and why. ★ means skim. The times are for a careful first read. **New or changed in Phase 9**
 is marked 🆕 (earlier additions are no longer marked).
 
 ### Step 0: orient (10 min)
@@ -344,96 +385,140 @@ Read these in order, after Step 9: a fork is a replay that goes live part-way.
 31. **[src/agentlab/remote.py](src/agentlab/remote.py)** ★★ (77 lines, 10 min): the store over
    HTTP; then `_rpc_handlers` in [server.py](src/agentlab/server.py).
 
-### Step 11: diff 🆕
+### Step 11: diff
 
-32. 🆕 **[src/agentlab/diff/steps.py](src/agentlab/diff/steps.py)** ★★ (118 lines, 10 min):
+32. **[src/agentlab/diff/steps.py](src/agentlab/diff/steps.py)** ★★ (118 lines, 10 min):
    `StepView`, `same_as`, `label`, and `extract_steps` for both kinds of run.
-33. 🆕 **[src/agentlab/diff/align.py](src/agentlab/diff/align.py)** ★★★ (165 lines, 20 min): read
+33. **[src/agentlab/diff/align.py](src/agentlab/diff/align.py)** ★★★ (165 lines, 20 min): read
    the module docstring first. Then `similarity` (the weights), `align` (prefix, then
    `_needleman_wunsch`: fill the table, then trace back), and `describe` (notes in words).
-34. 🆕 **[src/agentlab/diff/report.py](src/agentlab/diff/report.py)** ★★ (163 lines, 10 min):
+34. **[src/agentlab/diff/report.py](src/agentlab/diff/report.py)** ★★ (163 lines, 10 min):
    `diff_runs`, `RunSide` (the effects), `_divergence`, `word_diff`, `to_dict`. Then
    `render_diff` at the end of [render.py](src/agentlab/render.py).
 
-### Step 12: the demo agents and the CLI
+### Step 12: blame
 
-35. **[src/agentlab/demo/triage.py](src/agentlab/demo/triage.py)** ★★ (212 lines, 10 min): an
+35. **[src/agentlab/blame/catalog.py](src/agentlab/blame/catalog.py)** ★★ (163 lines, 10 min):
+   `SeededBug` (an instruction plus a matcher), the 10 bugs, `guilty_step`, `seeded_agents`.
+36. **[src/agentlab/blame/propose.py](src/agentlab/blame/propose.py)** ★★★ (122 lines, 10 min):
+   the judge's prompt (what "first wrong step" means), the `Proposal` schema, and `render_steps`.
+37. **[src/agentlab/blame/verify.py](src/agentlab/blame/verify.py)** ★★★ (115 lines, 15 min):
+   `classify` (the thresholds), then `verify_candidate`: a fork plus control, then the c+1 fork.
+38. **[src/agentlab/blame/runner.py](src/agentlab/blame/runner.py)** ★★★ (124 lines, 10 min):
+   `execute_blame`, `_confidence` and `_verdict`. Trace it against Section 2f.
+39. **[src/agentlab/blame/bench.py](src/agentlab/blame/bench.py)** ★★ (228 lines, 15 min):
+   `seed_failures`, `seeded_failures`, `benchmark_proposals` (top-1/top-3/within-one/baseline),
+   `benchmark_verification` (accuracy, precision, abstention).
+
+### Step 13: lock it in
+
+40. **[src/agentlab/evals/regressions.py](src/agentlab/evals/regressions.py)** ★★★ (101 lines,
+   10 min): `lock_in` (a failed run → a regression task) and `check_gate` (the CI rule).
+41. The `recorded_prompt` in `ForkSession` and `_apply_override` in
+   [gemini.py](src/agentlab/llm/gemini.py): why a fork keeps the recorded prompt (D-051).
+
+### Step 14: hosting 🆕
+
+42. 🆕 **[src/agentlab/hosting.py](src/agentlab/hosting.py)** ★★ (10 min): `public_config`,
+   `HourlyCap`, `guard_paid_job`, `guard_local_only`, and `snapshot` (`VACUUM INTO`, then a scan
+   for secrets).
+43. 🆕 **[Dockerfile](Dockerfile)**, **[deploy/start.sh](deploy/start.sh)**,
+   **[ui/vercel.json](ui/vercel.json)** and **[DEPLOY.md](DEPLOY.md)** ★ (10 min): how the container
+   is built and seeded, and how Vercel proxies `/api`.
+
+### Step 15: the demo agents and the CLI
+
+44. **[src/agentlab/demo/triage.py](src/agentlab/demo/triage.py)** ★★ (212 lines, 10 min): an
     on-call assistant over simulated alerts, metrics, logs and deploys. Read the top docstring for
     each incident's real cause and its distraction.
-36. **[src/agentlab/render.py](src/agentlab/render.py)** ★ (5 min): the terminal tree, and
+45. **[src/agentlab/render.py](src/agentlab/render.py)** ★ (5 min): the terminal tree, and
     `render_eval` for the report.
-37. **[src/agentlab/cli.py](src/agentlab/cli.py)** ★★ (519 lines, 15 min): `run`, `runs`, `show`,
-    `eval`, `evals`, `report`, `ui`, `replay`, `fidelity`, `fork`, `worker`, and 🆕 `diff`.
+46. **[src/agentlab/cli.py](src/agentlab/cli.py)** ★★ (519 lines, 15 min): `run`, `runs`, `show`,
+    `eval`, `evals`, `report`, `ui`, `replay`, `fidelity`, `fork`, `worker`, `diff`, and
+    `blame`, `blame-bench`, `seed-failures`.
 
-### Step 13: evals
+### Step 16: evals
 
 Read these in this order; each one uses the ones before it.
 
-38. **[datasets/support.jsonl](datasets/support.jsonl)** ★★ (5 min): look at two or three tasks:
+47. **[datasets/support.jsonl](datasets/support.jsonl)** ★★ (5 min): look at two or three tasks:
     input, expected outcome, checks.
-39. **[src/agentlab/evals/categories.py](src/agentlab/evals/categories.py)** ★★ (49 lines, 5 min):
+48. **[src/agentlab/evals/categories.py](src/agentlab/evals/categories.py)** ★★ (49 lines, 5 min):
     the failure categories and `pick_category`.
-40. **[src/agentlab/evals/trajectory.py](src/agentlab/evals/trajectory.py)** ★★★ (79 lines,
+49. **[src/agentlab/evals/trajectory.py](src/agentlab/evals/trajectory.py)** ★★★ (79 lines,
     10 min): a stored run flattened for checks, and `transcript()` for the judge. Scoring from
     the *store* is why evals work on any agent (D-023).
-41. **[src/agentlab/evals/judge.py](src/agentlab/evals/judge.py)** ★★★ (80 lines, 10 min):
+50. **[src/agentlab/evals/judge.py](src/agentlab/evals/judge.py)** ★★★ (80 lines, 10 min):
     structured output with a pydantic `Verdict`, reasoning before verdict, and the judge prompt.
-42. **[src/agentlab/evals/tasks.py](src/agentlab/evals/tasks.py)** ★★★ (226 lines, 20 min): the
+51. **[src/agentlab/evals/tasks.py](src/agentlab/evals/tasks.py)** ★★★ (226 lines, 20 min): the
     check classes (`Grounded`), the discriminated union `Check`, `Task`, `load_dataset` and
     `load_tasks`.
-43. **[src/agentlab/evals/metrics.py](src/agentlab/evals/metrics.py)** ★★ (65 lines, 5 min):
+52. **[src/agentlab/evals/metrics.py](src/agentlab/evals/metrics.py)** ★★ (65 lines, 5 min):
     `percentile` and `summarize`.
-44. **[src/agentlab/evals/runner.py](src/agentlab/evals/runner.py)** ★★★ (119 lines, 15 min): the
+53. **[src/agentlab/evals/runner.py](src/agentlab/evals/runner.py)** ★★★ (119 lines, 15 min): the
     batch runner, which uses threads and scores and saves each task. Trace it against Section 2b.
 
-### Step 14: the server and the UI
+### Step 17: the server and the UI
 
-45. **[src/agentlab/server.py](src/agentlab/server.py)** ★★ (425 lines, 15 min): the response
+54. **[src/agentlab/server.py](src/agentlab/server.py)** ★★ (425 lines, 15 min): the response
     models, then the routes in `create_app`: replay, `POST /api/forks`, `GET /api/forks/{id}`,
-    `/family`, the `/api/store/{method}` RPC, and 🆕 `GET /api/diff`. Open http://127.0.0.1:8000/docs while `lab ui` runs.
-46. **[ui/src/api.ts](ui/src/api.ts)** ★★ (5 min): the same shapes in TypeScript, plus fetchers.
-47. **[ui/src/lib/layout.ts](ui/src/lib/layout.ts)** ★★★ (50 lines, 10 min) and its test,
+    `/family`, the `/api/store/{method}` RPC, `GET /api/diff`, and `/api/blames` and
+    `/api/benchmarks/{kind}`. Open http://127.0.0.1:8000/docs while `lab ui` runs.
+55. **[ui/src/api.ts](ui/src/api.ts)** ★★ (5 min): the same shapes in TypeScript, plus fetchers
+    (the demo key is added to POSTs). Then 🆕 **[ui/src/lib/config.tsx](ui/src/lib/config.tsx)**
+    (`useAction`: what is allowed here) and 🆕 **[ui/src/pages/Home.tsx](ui/src/pages/Home.tsx)**
+    (the Overview, built from `/api/showcase`).
+56. **[ui/src/lib/layout.ts](ui/src/lib/layout.ts)** ★★★ (50 lines, 10 min) and its test,
     [layout.test.ts](ui/src/lib/layout.test.ts): the tree layout.
-48. **[ui/src/lib/hooks.ts](ui/src/lib/hooks.ts)** ★ (5 min): the hash router and `useLoad`.
-49. **[ui/src/components/SpanNode.tsx](ui/src/components/SpanNode.tsx)** →
+57. **[ui/src/lib/hooks.ts](ui/src/lib/hooks.ts)** ★ (5 min): the hash router and `useLoad`.
+58. **[ui/src/components/SpanNode.tsx](ui/src/components/SpanNode.tsx)** →
     **[TraceTree.tsx](ui/src/components/TraceTree.tsx)** ★★★ (15 min): one node, then the whole
     tree with its red error path.
-50. **[ui/src/components/Inspector.tsx](ui/src/components/Inspector.tsx)** ★★ (10 min): rebuilds
+59. **[ui/src/components/Inspector.tsx](ui/src/components/Inspector.tsx)** ★★ (10 min): rebuilds
     the exact prompt from a recording.
-51. **[ui/src/components/ReplayPanel.tsx](ui/src/components/ReplayPanel.tsx)** ★ (5 min): the
-    Replay button, and a replay's fidelity report.
-52. **[ui/src/components/ForkDialog.tsx](ui/src/components/ForkDialog.tsx)** ★★ (10 min): the
+60. 🆕 **[ui/src/components/RunActions.tsx](ui/src/components/RunActions.tsx)** ★★ (5 min): the
+    action row (replay, compare, blame, lock in) and the one-line banner.
+61. **[ui/src/components/ForkDialog.tsx](ui/src/components/ForkDialog.tsx)** ★★ (10 min): the
     override editor, opened from the inspector. Then
     **[ui/src/pages/ForkView.tsx](ui/src/pages/ForkView.tsx)** (polling, pass-rate cards) and
     **[ui/src/components/FamilyTree.tsx](ui/src/components/FamilyTree.tsx)** (the run family).
-53. 🆕 **[ui/src/pages/DiffView.tsx](ui/src/pages/DiffView.tsx)** ★★ (10 min): the side-by-side
+62. **[ui/src/pages/DiffView.tsx](ui/src/pages/DiffView.tsx)** ★★ (10 min): the side-by-side
     rows (`groupRows` folds identical steps), the effects table and the word diff. Then
     **[ui/src/components/ComparePanel.tsx](ui/src/components/ComparePanel.tsx)**: how candidates
     are ranked.
-54. **[ui/src/pages/](ui/src/pages/)** ★ (10 min): `Runs.tsx`, `RunView.tsx`, `Evals.tsx`; then
+63. **[ui/src/pages/BlameView.tsx](ui/src/pages/BlameView.tsx)** ★★ (10 min): the blame report
+    (verdict, candidates, evidence links) and `BlameBench` (the accuracy chart). Then
+    **[LockInButton.tsx](ui/src/components/LockInButton.tsx)** and the `blamed` flag in
+    [SpanNode.tsx](ui/src/components/SpanNode.tsx).
+64. **[ui/src/pages/](ui/src/pages/)** ★ (10 min): `Runs.tsx`, `RunView.tsx`, `Evals.tsx`; then
     [App.tsx](ui/src/App.tsx) and [main.tsx](ui/src/main.tsx).
 
-### Step 15: tests (the specification)
+### Step 18: tests (the specification)
 
-55. **[tests/test_loop.py](tests/test_loop.py)** ★★★: `ScriptedLLM`, a fake model.
-56. **[tests/test_replay.py](tests/test_replay.py)** ★★★: record with a fake Gemini, replay
+65. **[tests/test_loop.py](tests/test_loop.py)** ★★★: `ScriptedLLM`, a fake model.
+66. **[tests/test_replay.py](tests/test_replay.py)** ★★★: record with a fake Gemini, replay
     offline, compare. Also covers thought signatures byte for byte, retries, a changed prompt
     diverging, timeouts and an entry point.
-57. **[tests/test_fork.py](tests/test_fork.py)** ★★★: a fake Gemini that answers according to
+67. **[tests/test_fork.py](tests/test_fork.py)** ★★★: a fake Gemini that answers according to
     the prompt (so a prompt fix really flips the outcome), prefix/live switching, every override,
     simulators, `ForkBlocked`, a full job with controls, the atomic claim, and the worker. Then
     **[tests/test_remote.py](tests/test_remote.py)**: the same over HTTP.
-58. 🆕 **[tests/test_diff.py](tests/test_diff.py)** ★★★: alignment on small hand-made step lists
+68. **[tests/test_diff.py](tests/test_diff.py)** ★★★: alignment on small hand-made step lists
     (insertions, deletions, changes), then stored runs, an own-loop agent and the API.
-59. **[tests/test_evals.py](tests/test_evals.py)** ★★★: every check type, the judge with a fake
+69. **[tests/test_blame.py](tests/test_blame.py)** ★★★: a fake judge plus the prompt-sensitive
+    fake Gemini, so every path is deterministic: decisive, recoverable (too early), a rejected
+    candidate then the right one, no proof, the matchers, the benchmarks, the worker and the API.
+70. **[tests/test_regressions.py](tests/test_regressions.py)** ★★: lock-in with and without a
+    blame, no duplicates, the gate's two rules, and the API.
+71. **[tests/test_evals.py](tests/test_evals.py)** ★★★: every check type, the judge with a fake
     LLM, categories, percentiles, and the runner end to end.
-60. **[tests/test_server.py](tests/test_server.py)**, **[test_ratelimit.py](tests/test_ratelimit.py)**,
+72. **[tests/test_server.py](tests/test_server.py)**, **[test_ratelimit.py](tests/test_ratelimit.py)**,
     **[test_demo.py](tests/test_demo.py)** ★★. `test_demo` checks that every dataset task names a
     real agent and tool, with valid arguments.
-61. **[tests/test_tools.py](tests/test_tools.py)**, **[test_tracing.py](tests/test_tracing.py)**,
+73. **[tests/test_tools.py](tests/test_tools.py)**, **[test_tracing.py](tests/test_tracing.py)**,
     **[test_gemini.py](tests/test_gemini.py)**, **[test_render.py](tests/test_render.py)** ★★.
 
-### Step 16: the why
+### Step 19: the why
 
 These decisions.md entries come up in interviews: **D-004** (own loop), **D-008** (positioning),
 **D-009** (integration), **D-013** (tool errors as data), **D-015** (step spans), **D-016**
@@ -441,8 +526,8 @@ These decisions.md entries come up in interviews: **D-004** (own loop), **D-008*
 limiting), **D-030** (replay re-executes code), **D-033** (clock and randomness), **D-035**
 (tool results are snapshots), **D-037** (fork by position, override at the boundary), **D-038**
 (event sourcing, the clock), **D-040** (controls and Fisher), **D-041/D-042** (workers and HTTP),
-🆕 **D-044/D-045** (steps and alignment). In [learnings.md](learnings.md), read the Phase 5
-section.
+**D-044/D-045** (steps and alignment), **D-047** (seeded bugs), **D-048** (propose, verify,
+pin down). In [learnings.md](learnings.md), read the Phase 6 section.
 
 ---
 
@@ -599,9 +684,16 @@ boundary is the SDK client, not our loop.
    one sentence ("always give the refund ID"), and fork 5× with a control. The fork page: **5/5 vs
    0/5, p = 0.008**. Then open the ALR-999 run's family tree and tell the three-fork story from
    [STORY.md](STORY.md), Chapter 4.
-7. 🆕 On a fork run, click **⇄ diff**: steps 1–2 identical (↺), divergence at step 3, ✗ → ✓, and
+7. On a fork run, click **⇄ diff**: steps 1–2 identical (↺), divergence at step 3, ✗ → ✓, and
    "RF-1001" highlighted in the answer diff. Then open the Flash run of `triage-external-provider`,
    **Compare with** its Flash-Lite run: three green "+" steps of verification, at 5× the cost.
+8. On the failed refund-ID run, press **🔍 Blame**. The blame page fills in: the judge's
+   candidates, then each one's fork evidence, then the verdict ("Step 3 is at fault, verified…").
+   Back on the run, step 3 carries a ⚑ flag. Finish on **Blame accuracy**: the chart over 50
+   seeded failures, with the "judge saw the prompt: no/yes" history.
+9. On the blame page, press **🔒 Save as regression test**, then in a terminal run
+   `lab eval datasets/regressions.jsonl --gate 0.9`: GATE PASSED (exit 0) now that the fix has
+   shipped. Explain that before the fix, the same command said GATE FAILED and exited 1.
 
 **Files to have open:** [loop.py](src/agentlab/loop.py), [tools.py](src/agentlab/tools.py),
 [tracing.py](src/agentlab/tracing.py), the wrapper in [gemini.py](src/agentlab/llm/gemini.py),
@@ -623,7 +715,9 @@ boundary is the SDK client, not our loop.
 > and compared with Fisher's exact test. The fork jobs run in the customer's repo through a worker,
 > because the lab never hosts their agent. And any two runs can be diffed: aligned step by step
 > with Needleman–Wunsch, the first divergence named in words, and the effect on outcome, tokens,
-> cost and time."
+> cost and time. On a failed run, Auto-Blame names the step at fault and proves it: a judge
+> proposes candidates with corrections, and forks against a control confirm them, measured on 50
+> failures from bugs I planted on purpose."
 
 **Questions you should be able to answer:**
 
@@ -650,10 +744,17 @@ boundary is the SDK client, not our loop.
 | How do you know the fix worked, not luck? | N forks vs N controls, scored by the task, Fisher's exact test: 5/5 vs 0/5 gives p = 0.008. | D-040 |
 | Where does a fork actually run? | In a worker with the agent's code: queued in a DB table, claimed by compare-and-set, results back over HTTP. | D-041, D-042 |
 | Most interesting fork? | ALR-999: a fix that made it worse, then a "significant" fix that was the agent inventing alert IDs past the LLM judge. A cheap `grounded` check exposed it, then a real fix gave 5/5 vs 0/5. | STORY.md |
-| 🆕 How do you line up two runs of different lengths? | Shared prefix, then Needleman–Wunsch: dynamic programming over (i, j), pairing steps by similarity or leaving gaps; a traceback gives same/changed/added/removed rows. | D-045 |
-| 🆕 Why not plain `diff` (LCS)? | LCS only pairs exact matches, so "same tool, different argument" becomes a removal plus an addition. NW pairs *similar* steps and explains the change. | learnings.md |
-| 🆕 How is similarity defined? | Tool names (multiset Jaccard, 0.6), arguments (0.3), results (0.1); answers by word overlap. Hand-tuned, explainable. | align.py |
-| 🆕 What did diffing Flash vs Flash-Lite show? | Flash adds verification lookups (7 steps vs 4 on one task, 5× cost); Flash-Lite bundles calls and usually still passes. | STORY.md, Chapter 5 |
+| How do you line up two runs of different lengths? | Shared prefix, then Needleman–Wunsch: dynamic programming over (i, j), pairing steps by similarity or leaving gaps; a traceback gives same/changed/added/removed rows. | D-045 |
+| Why not plain `diff` (LCS)? | LCS only pairs exact matches, so "same tool, different argument" becomes a removal plus an addition. NW pairs *similar* steps and explains the change. | learnings.md |
+| How is similarity defined? | Tool names (multiset Jaccard, 0.6), arguments (0.3), results (0.1); answers by word overlap. Hand-tuned, explainable. | align.py |
+| What did diffing Flash vs Flash-Lite show? | Flash adds verification lookups (7 steps vs 4 on one task, 5× cost); Flash-Lite bundles calls and usually still passes. | STORY.md, Chapter 5 |
+| How does Auto-Blame work? | A judge proposes up to 3 "first wrong steps", each with a correction; each is forked with the correction against a control; the first confirmed wins, then a fork one step later says whether it was decisive. | D-048 |
+| Where does ground truth come from? | 10 planted prompt bugs, each with a matcher for its guilty step; 50 seeded runs that failed *and* show the bug. | D-047 |
+| How do you know the judge isn't just confident? | Its confidence isn't used: "high" means the correction beat the control with p < 0.05 and the step was decisive. Otherwise it abstains. | learnings.md |
+| What's precision vs accuracy here? | Accuracy: right over all cases. Precision: right over the blames we *confirmed*. Verification trades some accuracy (abstaining) for precision. | D-049 |
+| How do you stop a fixed failure coming back? | Lock it in: the failure becomes a regression task (with a check from the proved fix), and `lab eval --gate` exits 1 if any regression fails, which blocks the merge in CI. | D-052 |
+| Why do forks keep the old prompt after you fixed it? | A counterfactual's baseline is the run as it happened. Otherwise the control silently includes the fix. | D-051 |
+| Something that surprised you? | The judge named the right step but its corrections lost to the planted prompt rule, so forks couldn't confirm it. Showing the judge the agent's prompt fixed that. | STORY.md, Chapter 6 |
 
 ---
 
@@ -695,17 +796,19 @@ boundary is the SDK client, not our loop.
 | Write safety | `tools.py` `_fork_fn` | Remove `simulated=True` from `refund_payment` and fork a refund run at step 2: watch `ForkBlocked`. Revert. |
 | Workers | `fork/worker.py` | `lab ui --no-worker`, queue a fork in the UI, then run `lab worker --once` in another terminal. |
 | Over HTTP | `remote.py` | `AGENTLAB_TOKEN=x lab ui --no-worker`, then `AGENTLAB_TOKEN=x lab worker --server http://127.0.0.1:8000 --once`; try a wrong token. |
-| 🆕 Alignment | `diff/align.py` | Change `GAP` to −0.2 and rerun `pytest tests/test_diff.py`: which tests fail, and why? (Hint: pairing gets more expensive than skipping.) |
-| 🆕 Similarity | `diff/align.py` | In a shell, compare `similarity()` for two steps that call the same tool with one argument changed, then with all arguments changed. |
-| 🆕 Diff | `lab diff` | `lab diff <a Flash-Lite run> <a Flash run of the same task>`; then the same pair in the UI with "Hide identical steps". |
+| Alignment | `diff/align.py` | Change `GAP` to −0.2 and rerun `pytest tests/test_diff.py`: which tests fail, and why? (Hint: pairing gets more expensive than skipping.) |
+| Similarity | `diff/align.py` | In a shell, compare `similarity()` for two steps that call the same tool with one argument changed, then with all arguments changed. |
+| Diff | `lab diff` | `lab diff <a Flash-Lite run> <a Flash run of the same task>`; then the same pair in the UI with "Hide identical steps". |
+| Seeded bugs | `blame/catalog.py` | `lab run support~swap-digits "Where is my order 4471?"`: watch the planted bug fire. |
+| Blame | `blame/runner.py` | `lab blame <a seeded failure> -n 3 -k 1`, then open the blame page and its fork links. |
+| Judge input | `blame/propose.py` | `lab blame-bench --no-prompt` vs without it: compare top-1 and verified accuracy in the history table. |
 
 ### Ways to work with Claude so you don't get lost
 
 - Ask for smaller slices: "implement only X, then stop and explain it".
 - Ask for the plan before the code: which files will change, and why.
-- Write one piece yourself each phase and ask Claude to review it. In Phase 6, try the blame
-  report's ranking: given candidate steps with fork pass rates, pick the confirmed one and a
-  confidence.
+- Write one piece yourself and ask Claude to review it. For the pitch, try writing your own
+  2-minute demo script from STORY.md, then compare it with the one in the pitch kit.
 - Ask "where does this value come from?" about any field in the UI, and follow it from the model's
   response to the database to the screen.
 
@@ -822,5 +925,57 @@ boundary is the SDK client, not our loop.
   - Flash verifies more than Flash-Lite (7 steps vs 4, 5× the cost) and usually both pass.
   - Parallel and sequential versions of the same calls look more different than they are
     (C-019).
-- **Experiments:** see the 🆕 rows in Section 7's table.
+- **Experiments:** see the rows in Section 7's table.
+
+### Phase 6: Auto-Blame
+- **Added:**
+  - `blame/` (catalog, propose, verify, runner, bench);
+  - `blames` and `benchmarks` tables, with one claim shared by forks and blames;
+  - `lab blame`, `lab seed-failures` and `lab blame-bench`;
+  - `/api/blames` and `/api/benchmarks/blame`;
+  - the 🔍 Blame panel, the blame page, ⚑ on the blamed step, and the Blame accuracy page.
+- **Key ideas:**
+  - failure attribution (Who&When);
+  - planted ground truth;
+  - propose, then verify by counterfactual forks, then pin down (decisive vs recoverable);
+  - abstaining;
+  - top-1/top-3 (precision at k), verified accuracy vs precision;
+  - judge calibration;
+  - the cost of verification.
+- **Seen live:**
+  - The refund-ID blame: "step 3, 5/5 vs 0/5, p = 0.008, decisive".
+  - Flash judges 92% top-1 vs Flash-Lite's 72% (baseline 30%).
+  - A judge that was right 8 times in 9 but provable only 4, until it was shown the prompt.
+- **Experiments:** see the rows in Section 7's table.
+
+### Phase 7 (cut down): lock it in
+- **Added:**
+  - `evals/regressions.py` (`lock_in`, `check_gate`) and `Task.origin`;
+  - `lab lock-in` and `lab eval --gate`;
+  - `POST /api/regressions` and the 🔒 button;
+  - the recorded-prompt pin in forks;
+  - the proved fix, shipped in the support prompt.
+- **Key ideas:**
+  - regression tests for sampled systems;
+  - CI exit codes;
+  - zero-tolerance regressions vs a pass-rate threshold;
+  - a counterfactual's baseline is the past.
+- **Seen live:** GATE FAILED with the bug present ("answer is missing 'RF-1001'"), then GATE PASSED
+  after the fix.
+
+### Phase 9: the pitch kit
+- **Added:**
+  - the Overview page with `/api/showcase`;
+  - the run page restructure (`RunActions`, `RunBanner`, tabs);
+  - `/api/config` and `useAction`, and the demo key;
+  - `hosting.py`, the Dockerfile, `deploy/`, the Vercel and Netlify configs, DEPLOY.md;
+  - `pitch/`;
+  - `RetryPolicy.max_hint_s`.
+- **Key ideas:**
+  - serverless vs containers, and proxy rewrites;
+  - guarding a live demo;
+  - `PYTHONUNBUFFERED`, `VACUUM INTO`, scanning for secrets;
+  - telling one story.
+- **Try:** `docker build -t agentlab . && docker run -p 8000:8000 -e AGENTLAB_DEMO_KEY=x agentlab`,
+  then open http://localhost:8000. Blame is greyed out until you enter the key with 🔑.
 

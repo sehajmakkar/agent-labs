@@ -130,6 +130,9 @@ class ForkSession(ReplaySession):
     fork_id: str | None = None
     fork_span_id: str | None = None
     tool_override_seq: int | None = None  # the recorded tool call whose result is replaced
+    # The system prompt the source run was sent. Live calls use it unless the override replaces
+    # it, so a fork changes one thing and keeps the rest as it was, even after the code changed.
+    recorded_prompt: str | None = None
     live: bool = False
     _prefix: dict[tuple, deque[_Recorded]] = field(default_factory=dict)
     _last_clock: dict[str, float] = field(default_factory=dict)
@@ -147,6 +150,7 @@ class ForkSession(ReplaySession):
         fork_id: str | None = None,
         fork_span_id: str | None = None,
         tool_override_seq: int | None = None,
+        recorded_prompt: str | None = None,
     ) -> "ForkSession":
         session = cls(
             source_run_id,
@@ -157,6 +161,7 @@ class ForkSession(ReplaySession):
             fork_id=fork_id,
             fork_span_id=fork_span_id,
             tool_override_seq=tool_override_seq,
+            recorded_prompt=recorded_prompt,
         )
         prefix: dict[tuple, deque[_Recorded]] = defaultdict(deque)
         for r in session.recordings:

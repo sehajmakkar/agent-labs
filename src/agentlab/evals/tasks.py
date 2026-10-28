@@ -185,6 +185,8 @@ class Task(BaseModel):
     expected: str
     checks: list[Check] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    # For a regression test: the run, blame and correction it was made from (evals/regressions.py).
+    origin: dict[str, Any] | None = None
 
     @property
     def needs_judge(self) -> bool:

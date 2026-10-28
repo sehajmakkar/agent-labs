@@ -197,7 +197,9 @@ class _TracedModels:
             if served is replay.LIVE and isinstance(session, replay.ForkSession):
                 # Past the fork point: the override is applied here, at the boundary, so it works
                 # for any agent, ours or a customer's.
-                model, config = _apply_override(session.override, model, config)
+                model, config = _apply_override(
+                    session.override, model, config, session.recorded_prompt
+                )
                 attributes[semconv.REQUEST_MODEL] = model
         request = _request_json(model, contents, config)
         with span("llm", f"chat {model}", attributes=attributes) as s:
@@ -247,12 +249,17 @@ class _TracedModels:
         return getattr(self._models, name)
 
 
-def _apply_override(override: Any, model: str, config: Any) -> tuple[str, Any]:
+def _apply_override(
+    override: Any, model: str, config: Any, recorded_prompt: str | None
+) -> tuple[str, Any]:
     if override.model:
         model = override.model
-    if override.system_prompt is not None:
+    # The override's prompt if it changes the prompt; otherwise the prompt the run was recorded
+    # with, not whatever the agent's code says today (decisions.md D-051).
+    prompt = override.system_prompt if override.system_prompt is not None else recorded_prompt
+    if prompt is not None:
         config = (config or types.GenerateContentConfig()).model_copy(
-            update={"system_instruction": override.system_prompt}
+            update={"system_instruction": prompt}
         )
     return model, config
 

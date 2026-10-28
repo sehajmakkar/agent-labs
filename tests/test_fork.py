@@ -14,16 +14,22 @@ from agentlab.loop import Agent, run_agent
 from agentlab.replay.session import ForkSession, Override
 from agentlab.retry import RetryPolicy
 from agentlab.tools import tool
+from agentlab.tracing import current_run_id
 
 PROMPT = "You are a support agent."
 FIXED_PROMPT = PROMPT + " Always give the customer the refund ID."
 STATE = {"refunds": [], "real_gateway_calls": 0, "simulator_calls": 0}
 
 
+def _run_refunds() -> list:
+    """This run's refunds: like the demo's SupportBackend, each run starts from a clean slate."""
+    return STATE.setdefault("by_run", {}).setdefault(current_run_id(), [])
+
+
 @tool(kind="read")
 def get_payments(order_id: str) -> dict:
     """List payments."""
-    refunded = {r["payment_id"] for r in STATE["refunds"]}
+    refunded = {r["payment_id"] for r in _run_refunds()}
     return {
         "payments": [
             {"payment_id": "P-2", "status": "refunded" if "P-2" in refunded else "captured"}
@@ -35,7 +41,8 @@ def get_payments(order_id: str) -> dict:
 def refund_payment(payment_id: str) -> dict:
     """Refund a payment (simulated backend)."""
     STATE["refunds"].append({"payment_id": payment_id})
-    return {"refund_id": f"RF-{1000 + len(STATE['refunds'])}"}
+    _run_refunds().append({"payment_id": payment_id})
+    return {"refund_id": f"RF-{1000 + len(_run_refunds())}"}
 
 
 @tool(kind="write")
@@ -102,7 +109,7 @@ TASK = Task.model_validate(
 
 @pytest.fixture(autouse=True)
 def reset_state():
-    STATE.update(refunds=[], real_gateway_calls=0, simulator_calls=0)
+    STATE.update(refunds=[], real_gateway_calls=0, simulator_calls=0, by_run={})
 
 
 def record_source(llm=None) -> str:
@@ -333,3 +340,25 @@ def test_old_runs_without_call_order_cannot_be_forked(store):
         db.execute("UPDATE recordings SET seq = NULL")
     with pytest.raises(ValueError, match="before Phase 3"):
         resolve_fork_point(store, source, step_span(store, source, 3).id)
+
+
+def test_controls_keep_the_recorded_prompt_even_after_the_code_changed(store):
+    source = record_source()
+    # The agent's prompt is "fixed" in code after the run was recorded.
+    fixed_agent = Agent("shop", FIXED_PROMPT, AGENT.tools)
+    llm, seen = smart_genai()
+    fork_id = store.create_fork(
+        source_run_id=source,
+        span_id=step_span(store, source, 3).id,
+        label="step 3",
+        override={},
+        n=1,
+        control=False,
+    )
+    summary = execute_fork(
+        store, store.get_fork(fork_id), llm=llm, agents={"shop": fixed_agent}, tasks={TASK.id: TASK}
+    )
+    # The live call was sent the prompt the run was recorded with, so the fork still fails:
+    # it changed nothing, as a control should.
+    assert seen[0].config.system_instruction == PROMPT
+    assert summary["fork"]["passed"] == 0

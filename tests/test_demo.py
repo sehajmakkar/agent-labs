@@ -9,7 +9,12 @@ from agentlab.demo.triage import search_logs
 from agentlab.evals import load_dataset
 from agentlab.evals.tasks import ToolCalled, ToolNotCalled
 
-DATASETS = sorted((Path(__file__).parents[1] / "datasets").glob("*.jsonl"))
+# The hand-written datasets; regressions.jsonl grows as failures are locked in.
+DATASETS = sorted(
+    p
+    for p in (Path(__file__).parents[1] / "datasets").glob("*.jsonl")
+    if p.name != "regressions.jsonl"
+)
 
 
 def test_there_are_twenty_one_tasks():

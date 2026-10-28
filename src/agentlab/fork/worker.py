@@ -41,6 +41,22 @@ def work(
     while not (stop and stop.is_set()):
         fork = store.claim_fork(names, worker=name)
         if fork is None:
+            blame = store.claim_blame(names, worker=name) if hasattr(store, "claim_blame") else None
+            if blame is not None:
+                _run_blame(
+                    store,
+                    blame,
+                    llm=llm,
+                    agents=agents,
+                    entry=entry,
+                    judge=judge,
+                    tasks=tasks,
+                    log=log,
+                )
+                done += 1
+                if once:
+                    return done
+                continue
             if once:
                 return done
             time.sleep(poll_s)
@@ -75,3 +91,23 @@ def _mark(result: dict[str, Any]) -> str:
     if result["passed"] is None:
         return result["status"]
     return "✓" if result["passed"] else f"✗ {result['category']}"
+
+
+def _run_blame(store: Store, blame: Any, *, log: Callable[[str], None], **context: Any) -> None:
+    from agentlab.blame.propose import BlameJudge
+    from agentlab.blame.runner import execute_blame
+
+    log(f"blame {blame.id[:8]} for run {blame.source_run_id[:8]}")
+    try:
+        report = execute_blame(
+            store,
+            blame,
+            blame_judge=BlameJudge(context["llm"], blame.judge_model),
+            tasks=context["tasks"] or {},
+            fork_context=context,
+        )
+        store.finish_blame(blame.id, report=report)
+        log(f"blame {blame.id[:8]} done: {report['verdict']}")
+    except Exception as e:
+        store.finish_blame(blame.id, error=f"{type(e).__name__}: {e}")
+        log(f"blame {blame.id[:8]} failed: {e}")

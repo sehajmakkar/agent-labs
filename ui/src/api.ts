@@ -81,6 +81,99 @@ export type RunDetail = {
   spans: Span[];
   replays: RunSummary[];
   forks: ForkInfo[];
+  blames: BlameInfo[];
+};
+
+export type Verification = {
+  step: number;
+  fork_id: string;
+  n: number;
+  passed: number;
+  control_passed: number;
+  p_value: number | null;
+  status: "confirmed" | "rejected" | "inconclusive";
+  later_fork_id: string | null;
+  later_passed: number | null;
+  decisive: boolean | null;
+};
+
+export type BlameCandidate = {
+  rank: number;
+  step: number;
+  span_id: string;
+  reasoning: string;
+  correction: string;
+  verification: Verification | null;
+};
+
+export type BlameReport = {
+  judge_model: string;
+  judge_cost_usd: number | null;
+  analysis: string;
+  candidates: BlameCandidate[];
+  blamed: BlameCandidate | null;
+  confidence: "high" | "medium" | null;
+  verdict: string;
+};
+
+export type BlameInfo = {
+  id: string;
+  source_run_id: string;
+  judge_model: string;
+  n: number;
+  max_candidates: number;
+  status: "queued" | "running" | "done" | "error";
+  worker: string | null;
+  created_at: string;
+  report: BlameReport | null;
+  error: string | null;
+};
+
+export type ProposalStats = {
+  cases: number;
+  top1: number | null;
+  top3: number | null;
+  within1: number | null;
+  last_step_baseline: number | null;
+  cost_per_case_usd: number | null;
+  by_bug: Record<string, { cases: number; top1: number; top3: number }>;
+};
+
+export type BlameBenchmark = {
+  id: string;
+  created_at: string;
+  history: {
+    id: string;
+    created_at: string;
+    judge_sees_prompt: boolean;
+    failures: number | null;
+    top1: Record<string, number | null>;
+    verified_accuracy: number | null;
+    precision: number | null;
+  }[];
+  results: {
+    failures: number;
+    judge_sees_prompt?: boolean;
+    proposals: Record<string, ProposalStats>;
+    verification?: {
+      cases: number;
+      judge_model: string;
+      n: number;
+      proposed_top1: number | null;
+      verified_accuracy: number | null;
+      precision: number | null;
+      abstained: number | null;
+      cases_detail: {
+        bug: string;
+        guilty_step: number;
+        proposed: number | null;
+        blamed: number | null;
+        decisive: boolean | null;
+        confidence: string | null;
+        blame_id: string;
+      }[];
+    };
+  };
 };
 
 export type Override = { system_prompt?: string; model?: string; tool_output?: unknown };
@@ -180,6 +273,29 @@ export type DiffResult = {
   effects: string[];
 };
 
+export type LabConfig = {
+  public: boolean;
+  actions: { replay: boolean; fork: boolean | "key"; blame: boolean | "key"; lock_in: boolean };
+  max_n: number;
+  repo: string;
+};
+
+export type Showcase = {
+  blame: { id: string; run: RunSummary; step: number; span_id: string; verdict: string } | null;
+  fork: {
+    id: string;
+    label: string;
+    passed: number;
+    control_passed: number | null;
+    n: number;
+    p_value: number | null;
+  } | null;
+  diff: { a: string; b: string } | null;
+  eval: { id: string; metrics: Metrics; model: string } | null;
+  bench: { failures: number; top1: Record<string, number | null>; precision: number | null } | null;
+  replay: { id: string; source: string } | null;
+};
+
 export type ForkRequest = {
   run_id: string;
   span_id: string;
@@ -219,7 +335,22 @@ export type EvalRun = {
 
 export type EvalDetail = { eval: EvalRun; runs: RunSummary[] };
 
+// On the hosted demo, forks and blames need a demo key; it is kept in this browser only.
+export const DEMO_KEY_STORAGE = "agentlab.demoKey";
+
+function demoKey(): string | null {
+  try {
+    return window.localStorage.getItem(DEMO_KEY_STORAGE);
+  } catch {
+    return null;
+  }
+}
+
 async function get<T>(path: string, init?: RequestInit): Promise<T> {
+  const key = demoKey();
+  if (key && init?.method === "POST") {
+    init = { ...init, headers: { ...(init.headers ?? {}), "X-Demo-Key": key } };
+  }
   const response = await fetch(path, init);
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
@@ -247,6 +378,22 @@ export const api = {
       body: JSON.stringify(request),
     }),
   models: () => get<Record<string, string>>("/api/models"),
+  config: () => get<LabConfig>("/api/config"),
+  showcase: () => get<Showcase>("/api/showcase"),
+  createBlame: (runId: string, n = 5) =>
+    get<BlameInfo>("/api/blames", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: runId, n }),
+    }),
+  blame: (id: string) => get<{ blame: BlameInfo; source: RunSummary }>(`/api/blames/${id}`),
+  blameBenchmark: () => get<BlameBenchmark>("/api/benchmarks/blame"),
+  lockIn: (runId: string) =>
+    get<{ task_id: string; created: boolean }>("/api/regressions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: runId }),
+    }),
   diff: (a: string, b: string) =>
     get<DiffResult>(`/api/diff?${new URLSearchParams({ a, b })}`),
   recordings: (spanId: string) => get<Recording[]>(`/api/spans/${spanId}/recordings`),

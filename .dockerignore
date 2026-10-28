@@ -1,0 +1,9 @@
+.venv
+.git
+.agentlab
+**/node_modules
+ui/dist
+**/__pycache__
+.pytest_cache
+.ruff_cache
+.env

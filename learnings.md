@@ -591,3 +591,156 @@ Eight tasks on Flash (8/8 passed) diffed against Flash-Lite runs of the same tas
 - The same exercise exposed a limitation: calls spread across several steps by one model and
   bundled into one step by the other show as added steps plus a change, not as "the same work,
   split up" (C-019).
+
+## 2026-10-28 — Phase 6: Auto-Blame
+
+### Failure attribution
+"The run failed" isn't actionable; "it failed because at step 3 it refunded the original payment"
+is. Failure attribution asks *which step* (and in multi-agent systems, *which agent*) caused a
+failure. The **Who&When** benchmark (2025) labelled failures in multi-agent logs by hand and found
+that even strong LLMs, given the whole log, pick the right step far less often than they pick the
+right agent. Steps are hard. Two lessons we built on:
+- **Judging alone is unreliable**, so a judge's answer must be checked.
+- **Ground truth is the bottleneck**, so we plant our own bugs (C-004).
+
+### Planting bugs with known causes
+Each seeded bug is one bad instruction added to an agent's prompt ("always refund the original
+payment"): a realistic regression, like a careless prompt edit. A *matcher* recognises the step
+where it shows (a `refund_payment(P-901)` call), and that is the ground truth. Not every planted
+bug fires. The model sometimes trusted a tool's description over the bad rule (`voided-is-charged`),
+and it ignored "always blame the latest deploy" when the logs clearly pointed at the card provider
+(`blame-deploy`, 0 of 5). Only runs that failed *and* show the bug count as test cases.
+
+### Propose, then verify
+- **Propose:** the judge reads the run as numbered steps and ranks up to three "first wrong
+  steps", each with a *correction* written as a general prompt rule. Structured output makes the
+  reply data, and putting reasoning before the step number makes the model argue first.
+- **Verify:** fork at each candidate with its correction N times, next to N controls without it
+  (Phase 4). Confirmed means the correction clearly wins. This is a *counterfactual* test: "had
+  step c been done right, would the run have passed?"
+- **Pin down:** apply the same correction one step *later*, keeping step c's original decision.
+  If the run can no longer be saved, step c was **decisive**: the point of no return. If it still
+  can, the mistake was **recoverable**, and the judge may have blamed too early.
+- **Abstain:** if no candidate is confirmed, there is no blame, only an unproven guess. A tool
+  people trust must be able to say "I don't know".
+
+### "First wrong" vs "point of no return"
+They usually coincide, but not always. If the agent wanders off at step 3 yet could still answer
+correctly at step 4, then step 3 was the first deviation, but step 4 is where the failure became
+certain. We report the judge's semantic choice ("first wrong"), verified as causal, and say
+whether it was decisive or recoverable rather than pretending these are the same.
+
+### Measuring blame: precision at k, and abstention
+- **Top-1 / top-3 (precision and recall at k):** is the guilty step the judge's first guess, or
+  among its top three? With k = 3, recall can be high while the first guess is often wrong.
+- **Within one step:** a lenient score, because adjacent steps are often both defensible.
+- **A naive baseline:** always blame the last step. If a judge can't beat this, it's adding nothing.
+- **After verification:**
+  - *verified accuracy:* confirmed and right, over all cases;
+  - *precision:* right, over confirmed cases. This is the number users care about: "when it says
+    step 3, is it step 3?";
+  - *abstention:* nothing confirmed.
+
+  Verification can lower accuracy (it abstains on right guesses it couldn't prove) while raising
+  precision. That's the trade a debugging tool should make.
+
+### Judge calibration
+A judge is *calibrated* if, among its answers given with 70% confidence, about 70% are right. LLM
+judges are poorly calibrated: they sound equally sure when right and when wrong, and the same
+model judging its own family's output adds self-preference (D-024). Calibration methods (asking
+for probabilities, sampling several times and voting, checking agreement with a labelled set) all
+help a bit. Our approach replaces the judge's confidence with *evidence*: the fork's pass rates
+and p-value. "High confidence" here means "p < 0.05 and decisive", not "the judge sounded sure".
+
+### The cost of verifying by replay
+Proposals cost one model call. Verifying one candidate costs about 3N runs (correction, control,
+one step later), each with a few live calls plus scoring: roughly 25–30 calls at N=3, and about
+twice that at N=5. Replay keeps it affordable: everything before the fork point is served from the
+recording, free and instant, so only the steps after the candidate cost anything. Trimming further:
+- verify candidates in rank order and stop at the first confirmed one;
+- verify only the top k;
+- use a small N for a first pass, and grow N only when results are close.
+
+### Seen live: Flash vs Flash-Lite as the judge
+On 50 seeded failures, with the judge not shown the agent's prompt:
+- Flash-Lite: top-1 72%, top-3 78%, within one step 94%.
+- Flash: top-1 92%, top-3 92%, within one step 100%.
+- The baseline "always blame the last step": 30%.
+
+Flash costs about 4.6× more per case ($0.0031 vs $0.0007) and is right on its first guess 20 points
+more often. For blame, the judge is worth spending on. Flash-Lite still beat the baseline by more
+than 40 points, and when it was wrong it was almost always one step off.
+
+### Seen live: right but unprovable
+Verifying 9 cases by forking (N=3), the judge's first guess was right 8 times, yet only 4 were
+confirmed: verified accuracy 44%, precision 100%, abstained 56%. The judge hadn't seen the agent's
+system prompt, so its corrections were generic ("carefully copy order numbers") and lost to the
+planted instruction they contradicted ("swap the last two digits"); the fork kept failing. Two
+lessons:
+- **A blame is only as useful as its fix.** "Step 1 is wrong" is right but not actionable unless
+  you know *why*: the prompt told it to.
+- **Verification protected precision.** It never confirmed a wrong step; it abstained instead.
+  The fix was to give the judge the prompt and ask it to override the offending line explicitly.
+
+### Seen live: the demo
+On the real refund-ID failure, the judge proposed step 3 ("the answer left out RF-1001"), with the
+correction "When reporting a successful refund, always include the refund ID". Forks: corrected
+5/5 vs control 0/5, p = 0.008, and it was the last step, so decisive. Confidence high. That is the
+same result Phase 4 reached by hand, now found and proved automatically.
+
+## 2026-10-28 — Phase 7 (cut down): lock it in
+
+### Regression tests for a nondeterministic system
+A regression test checks that something that once broke stays fixed. For ordinary code it is a
+unit test. For an agent it is an eval task: the input that failed, the checks that caught it, and
+here one more check built from the proved correction, so the *specific* failure mode is tested even
+if the original checks were loose. Because the model is sampled, a regression test can fail by
+chance. The serious version runs each one N times and gates on its pass rate. Ours runs once
+(D-052), which is enough when the fix moved the pass rate from 0/5 to 5/5.
+
+### CI gates and exit codes
+CI (GitHub Actions, GitLab CI…) runs commands on every pull request and blocks the merge if one
+fails. "Fails" means the process exited with a non-zero code. So a gate is just a program that
+checks a condition and calls `exit(1)`. Ours fails when the success rate drops below a threshold
+*or* any regression test fails (zero tolerance). Thresholds tolerate noise on ordinary tasks;
+regressions don't get that slack, because they are bugs already paid for once.
+
+### The baseline of a counterfactual is the past, not the present
+After shipping the fix to the support prompt, a fork of the old failing run would have used the
+*fixed* prompt in its control (the code as it is now), and "without the correction" would have
+passed. A counterfactual asks "what if, in *that* run, one thing had differed?", so everything else
+must stay as recorded, including the prompt (D-051). It is the same idea as replay: recorded inputs
+are the truth; today's code is the variable.
+
+## 2026-10-28 — Hosting and the pitch
+
+### Serverless vs containers
+Vercel and Netlify run *functions*: short, stateless, with nothing kept on disk. That's great for a
+static UI and quick API calls. Our backend has a long-running worker (a blame takes minutes) and a
+database file, so it needs a *container* with a disk (Fly, Render, Railway). The usual pattern: the
+static UI on the CDN, with a **rewrite or proxy** sending `/api/*` to the container. The browser
+sees one origin, so there's no CORS setup.
+
+### Guarding a live demo
+Anything a visitor can click that spends money needs a gate:
+- open what's free (reading, replay);
+- put paid actions (fork, blame) behind a shared demo key;
+- cap N and the jobs per hour;
+- switch off what writes files.
+
+The UI asks `/api/config` what's allowed, and greys buttons out with a reason instead of letting
+them fail.
+
+### Small things that bite in containers
+- Python buffers stdout when it isn't a terminal, so logs looked empty until
+  `PYTHONUNBUFFERED=1`.
+- `VACUUM INTO` copies a live SQLite database consistently, including the write-ahead log. Plain
+  file copying can miss recent writes.
+- Scan anything you publish for secrets before writing it (`lab snapshot` refuses if anything
+  looks like a Google API key).
+
+### Pitching an engineering project
+Lead with one story told end to end, not the feature list:
+failure → blame → proof → diff → lock it in. Put real numbers on the first screen, link to the
+exact page that proves each claim, and tailor the *first* feature shown to what the company already
+builds: diff for experiment tools, blame for root-cause tools, lock-in for monitoring tools.

@@ -90,3 +90,12 @@ def resolve_fork_point(store: Store, run_id: str, span_id: str) -> ForkPoint:
 
 def _step(span: SpanRow) -> str:
     return str(span.attributes.get(semconv.STEP_INDEX, "?"))
+
+
+def recorded_system_prompt(store: Store, run_id: str) -> str | None:
+    """The system prompt the run's first model call was sent, from its recording."""
+    for r in store.run_recordings(run_id):
+        if r.kind == "llm":
+            instruction = (r.request.get("config") or {}).get("system_instruction")
+            return instruction if isinstance(instruction, str) else None
+    return None

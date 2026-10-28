@@ -72,6 +72,10 @@ around it.
   - `remote.py`: `RemoteStore`, the store over HTTP (`lab.init("http://…")`, `lab worker --server`).
   - `diff/`: runs as steps, Needleman–Wunsch step alignment with a weighted similarity, and the diff
     report (divergence, effects, answer word diff).
+  - `hosting.py`: hosted mode (`AGENTLAB_PUBLIC=1`): what is open, the demo key, caps, `snapshot`.
+  - `blame/`: seeded bugs (ground truth), the blame judge, verification by forking, the blame
+    runner, and the accuracy benchmark. Seeded agents are named `support~<bug>`/`triage~<bug>` and
+    are included by `demo_agents(seeded=True)`.
   - `determinism.py`: `lab.now()`, `lab.monotonic()`, `lab.random()`, which are replayable.
   - `semconv.py`: span attribute names (OTel GenAI v1.41.0 plus our `agentlab.*`).
   - `llm/`: neutral types, the Gemini adapter, `wrap_genai_client` (the model-call boundary) and
@@ -84,6 +88,10 @@ around it.
     only place they live), `cli.py`.
 - `datasets/`: eval tasks as JSONL (20 tasks).
 - `ui/`: React + TypeScript + Vite + React Flow. `npm run build` → `ui/dist`, served by `lab ui`.
+  Overview (`#/`) is built from `/api/showcase`; `/api/config` decides which actions are enabled.
+- `Dockerfile`, `deploy/` (start script, `seed.db.gz` from `lab snapshot`), `ui/vercel.json`,
+  `ui/netlify.toml`, `DEPLOY.md`: hosting (D-054).
+- `pitch/`: `DEMO_SCRIPT.md`, `WRITEUP.md` (public) and `private/` (git-ignored company notes).
 - `examples/customer_app.py`: an agent with its own loop, traced with the SDK alone.
 - `tests/`: pytest. Tests never call the network: use a scripted fake LLM (`tests/fakes.py`), or
   a fake `genai` client wrapped with `wrap_genai_client`. The `store` fixture gives a fresh trace
@@ -104,6 +112,13 @@ uv run lab fidelity                       # replay recent demo runs, share that 
 uv run lab fork <run> --step N --append-prompt "…" -n 5   # fork with a control; needs API key
 uv run lab worker [--entry FILE.py:FN] [--server URL] [--once]   # run queued fork jobs
 uv run lab diff <run-a> <run-b>           # trajectory diff in the terminal (UI: #/diff/A/B)
+uv run lab blame <failed-run> [-n 5] [-k 2]   # propose + verify by forking (needs API key)
+uv run lab seed-failures [--runs 5]        # plant the catalog's bugs, make labelled failures
+uv run lab blame-bench [--judges flash-lite,flash] [--verify 9] [-n 3]   # blame accuracy
+uv run lab lock-in <failed-run>           # save as a regression test (datasets/regressions.jsonl)
+uv run lab eval datasets/*.jsonl --gate 0.9   # CI gate: exit 1 on <90% or any regression failing
+uv run lab snapshot                       # deploy/seed.db.gz for the hosted demo (scanned for keys)
+docker build -t agentlab . && docker run -p 8000:8000 -e AGENTLAB_DEMO_KEY=x agentlab   # hosted mode
 (cd ui && npm install && npm run build && npm test)   # UI build and layout tests
 uv run lab ui                             # API + UI on http://127.0.0.1:8000 (Vite dev: cd ui && npm run dev)
 ```
@@ -117,7 +132,8 @@ Replay rules (D-030 to D-035): any new source of nondeterminism in agent code mu
 interceptor (`lab.now()`, `lab.random()`, a wrapped client or `@tool`). Tool results are deep-copied
 snapshots. During replay no tool or model is ever called.
 
-Fork rules (D-037 to D-042): overrides are applied at the boundaries, never inside agent code. A
+Fork rules (D-037 to D-042, D-051): overrides are applied at the boundaries, never inside agent
+code; live calls keep the recorded system prompt unless the override replaces it. A
 live write tool in a fork runs only through a simulator (`simulated=True` or `@tool.simulator`),
 otherwise `ForkBlocked`. The API server never executes agent code: it queues fork jobs, and
 workers run them. `AGENTLAB_TOKEN` guards `/api/store/*` when set.
@@ -147,8 +163,21 @@ workers run them. `AGENTLAB_TOKEN` guards `/api/store/*` when set.
   plus Needleman–Wunsch on a weighted step similarity; the first divergence in words; downstream
   effects and an answer word diff; `lab diff`, `/api/diff`, the diff page, and "Compare with". 111
   Python tests; verified on the refund fork and on Flash vs Flash-Lite over 8 tasks.
-- Next: Phase 6 (Auto-Blame). See the checklist in PLAN.md. Tier 1 outreach can start (the
-  author's step).
+- **Phase 6 done** (2026-10-28): Auto-Blame. 10 seeded prompt bugs (50 labelled failures); a
+  blame judge (sees the agent's prompt) ranks candidates with corrections; forks against a control
+  verify them, and a fork one step later says decisive or recoverable; confidence from the
+  evidence; abstains when nothing is proved; `lab blame`, `lab blame-bench`, blame jobs in the
+  worker, the blame and accuracy pages. 122 Python tests; verified live (refund-ID: step 3, 5/5 vs
+  0/5, high confidence).
+- **Phase 7 done, cut down** (2026-10-28, D-053): "lock it in". Blamed failures become regression
+  tests (`lab lock-in`, the UI button) with a judge check from the proved correction; `lab eval
+  --gate` exits 1 on a low success rate or any failed regression; forks keep the recorded system
+  prompt (D-051). The proved refund-ID fix is now in the support agent. 127 Python tests; the gate
+  verified failing and then passing live. The rest of Phase 7 and Phase 8 are deferred.
+- **Phase 9 built** (2026-10-28): a calmer UI with an Overview page, a hosted mode with guards,
+  Docker, Vercel and Netlify configs, DEPLOY.md, the demo script, the write-up, the company notes and
+  README proof. Left for the author: deploying, recording the video, and outreach. 134 Python tests.
+- Deferred (D-053): the rest of Phase 7, Phase 8, OTel import, a LangGraph adapter.
 - Stack accepted (D-003 to D-006, D-011):
   - Python 3.12 with uv, FastAPI, SQLite/SQLModel, React + React Flow.
   - Our own agent loop with interception at the LLM client and tool functions. No LangGraph in the

@@ -11,10 +11,12 @@ const nodeTypes = { span: SpanNode };
 export function TraceTree({
   spans,
   selectedId,
+  blamedId,
   onSelect,
 }: {
   spans: Span[];
   selectedId?: string;
+  blamedId?: string;
   onSelect: (id: string) => void;
 }) {
   const { nodes, edges } = useMemo(() => {
@@ -39,6 +41,7 @@ export function TraceTree({
           span,
           selected: p.id === selectedId,
           onError: onErrorPath.has(p.id),
+          blamed: p.id === blamedId,
           decision: span.kind === "step" ? decision(span.id, spans) : undefined,
         },
       };
@@ -53,7 +56,7 @@ export function TraceTree({
         className: s.status === "error" || onErrorPath.has(s.id) ? "edge-error" : undefined,
       }));
     return { nodes, edges };
-  }, [spans, selectedId]);
+  }, [spans, selectedId, blamedId]);
 
   return (
     <ReactFlow

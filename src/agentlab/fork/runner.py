@@ -15,7 +15,7 @@ from agentlab.evals.judge import LLMJudge
 from agentlab.evals.runner import score
 from agentlab.evals.tasks import Task
 from agentlab.evals.trajectory import Trajectory
-from agentlab.fork.point import resolve_fork_point
+from agentlab.fork.point import recorded_system_prompt, resolve_fork_point
 from agentlab.fork.stats import fisher_exact, verdict
 from agentlab.llm.gemini import GeminiClient
 from agentlab.loop import Agent
@@ -42,6 +42,7 @@ def execute_fork(
     point = resolve_fork_point(store, source.id, fork.span_id)
     recordings = store.run_recordings(source.id)
     override = Override.model_validate(fork.override or {})
+    recorded_prompt = recorded_system_prompt(store, source.id)
     task = (tasks or {}).get(source.task_id or "")
 
     groups: dict[str, list[dict[str, Any]]] = {"fork": [], "control": []}
@@ -60,6 +61,7 @@ def execute_fork(
                 tool_override_seq=point.tool_override_seq
                 if role_override.tool_output is not None
                 else None,
+                recorded_prompt=recorded_prompt,
             )
             error = run_in_session(
                 store,

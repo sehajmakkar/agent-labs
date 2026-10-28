@@ -61,3 +61,15 @@ def test_retry_delay_is_read_from_retry_info():
     e = errors.ClientError(429, {"error": {"code": 429, "message": "quota", "details": [detail]}})
     assert _retry_delay(e) == 3.6
     assert _retry_delay(errors.ClientError(429, {"error": {"code": 429, "message": "x"}})) is None
+
+
+def test_a_very_long_server_hint_fails_fast_instead_of_hanging():
+    waits = []
+
+    def quota_exhausted():
+        raise TransientLLMError("429 quota", retry_after_s=40_000)
+
+    policy = RetryPolicy(max_attempts=5, sleep=waits.append)
+    with pytest.raises(TransientLLMError, match="probably a quota limit"):
+        call_with_retries(quota_exhausted, policy)
+    assert waits == []

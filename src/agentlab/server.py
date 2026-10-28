@@ -2,8 +2,8 @@
 
 A thin layer over the trace store. Most endpoints read. The writes:
 - `POST /api/runs/{id}/replay`: safe, because a replay calls nothing outside the process;
-- `POST /api/forks`: only *queues* a fork job. A worker running the agent's own code executes it
-  (`fork/worker.py`), never this server;
+- `POST /api/forks` and `POST /api/blames`: only *queue* a job. A worker running the agent's own
+  code executes it (`fork/worker.py`), never this server;
 - `POST /api/store/{method}`: the narrow RPC that `RemoteStore` uses, so workers and SDKs elsewhere
   can send runs here. Guarded by `AGENTLAB_TOKEN` when that is set.
 
@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -109,11 +109,39 @@ class ForkInfo(BaseModel):
     error: str | None
 
 
+class BlameInfo(BaseModel):
+    id: str
+    source_run_id: str
+    judge_model: str
+    n: int
+    max_candidates: int
+    status: str
+    worker: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    report: dict[str, Any] | None
+    error: str | None
+
+
+class BlameRequest(BaseModel):
+    run_id: str
+    n: int = 5
+    max_candidates: int = 2
+    judge_model: str = "flash-lite"  # a tier name or a model ID
+
+
+class BlameDetail(BaseModel):
+    blame: BlameInfo
+    source: RunSummary
+
+
 class RunDetail(BaseModel):
     run: RunSummary
     spans: list[Span]
     replays: list[RunSummary]  # replays of this run, newest first
     forks: list[ForkInfo]  # fork jobs started from this run, newest first
+    blames: list[BlameInfo]  # blame jobs for this run, newest first
 
 
 class ForkRequest(BaseModel):
@@ -215,7 +243,99 @@ def create_app(store: Store, ui_dist: Path | None = UI_DIST) -> FastAPI:
             spans=[_span(s) for s in store.spans(run_id)],
             replays=_summaries(store, store.replays_of(run_id)),
             forks=[_fork(f) for f in store.forks_of(run_id)],
+            blames=[_blame(b) for b in store.blames_of(run_id)],
         )
+
+    @app.post("/api/blames", response_model=BlameInfo)
+    def create_blame(request: BlameRequest, http: Request):
+        from agentlab.hosting import guard_paid_job
+
+        guard_paid_job(http, request.n)
+        from agentlab.config import load_settings
+        from agentlab.evals.tasks import load_tasks
+
+        run = store.get_run(request.run_id)
+        if run is None:
+            raise HTTPException(404, f"No run {request.run_id}")
+        settings = load_settings()
+        result = store.eval_results_for_runs([run.id]).get(run.id)
+        if run.task_id is None or run.task_id not in load_tasks(settings.datasets_dir):
+            raise HTTPException(
+                400, "Blame needs a run from an eval task: its checks score the forks"
+            )
+        if result is not None and result.passed:
+            raise HTTPException(400, "This run passed its checks: there is nothing to blame")
+        if not 1 <= request.n <= 10 or not 1 <= request.max_candidates <= 3:
+            raise HTTPException(400, "n must be 1–10 and max_candidates 1–3")
+        tiers = {"flash": settings.flash_model, "flash-lite": settings.flash_lite_model}
+        blame_id = store.create_blame(
+            source_run_id=run.id,
+            judge_model=tiers.get(request.judge_model, request.judge_model),
+            n=request.n,
+            max_candidates=request.max_candidates,
+        )
+        return _blame(store.get_blame(blame_id))
+
+    @app.post("/api/regressions")
+    def create_regression(request: dict[str, str]) -> dict[str, Any]:
+        """Save a failed run as a regression test in the datasets folder (`lab lock-in`)."""
+        from agentlab.config import load_settings
+        from agentlab.hosting import guard_local_only
+
+        guard_local_only("Saving regression tests")
+        from agentlab.evals.regressions import lock_in
+        from agentlab.evals.tasks import load_tasks
+
+        settings = load_settings()
+        try:
+            task, created = lock_in(
+                store,
+                request.get("run_id", ""),
+                tasks=load_tasks(settings.datasets_dir),
+                datasets_dir=settings.datasets_dir,
+            )
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"task_id": task.id, "created": created, "origin": task.origin}
+
+    @app.get("/api/blames/{blame_id}", response_model=BlameDetail)
+    def get_blame(blame_id: str):
+        try:
+            blame = store.find_blame(blame_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        (source,) = _summaries(store, [store.get_run(blame.source_run_id)])
+        return BlameDetail(blame=_blame(blame), source=source)
+
+    @app.get("/api/benchmarks/{kind}")
+    def benchmark(kind: str) -> dict[str, Any]:
+        row = store.latest_benchmark(kind)
+        if row is None:
+            raise HTTPException(404, f"No {kind} benchmark yet: run `lab blame-bench`")
+        history = [
+            {
+                "id": b.id,
+                "created_at": _utc(b.created_at),
+                "judge_sees_prompt": (b.results or {}).get("judge_sees_prompt", False),
+                "failures": (b.results or {}).get("failures"),
+                "top1": {
+                    m: p.get("top1") for m, p in (b.results or {}).get("proposals", {}).items()
+                },
+                "verified_accuracy": ((b.results or {}).get("verification") or {}).get(
+                    "verified_accuracy"
+                ),
+                "precision": ((b.results or {}).get("verification") or {}).get("precision"),
+            }
+            for b in store.benchmarks(kind)
+        ]
+        return {
+            "id": row.id,
+            "created_at": _utc(row.created_at),
+            "results": row.results,
+            "history": history,
+        }
 
     @app.get("/api/runs/{run_id}/family", response_model=FamilyNode)
     def family(run_id: str):
@@ -228,7 +348,10 @@ def create_app(store: Store, ui_dist: Path | None = UI_DIST) -> FastAPI:
         return _family(store, run, depth=0)
 
     @app.post("/api/forks", response_model=ForkInfo)
-    def create_fork(request: ForkRequest):
+    def create_fork(request: ForkRequest, http: Request):
+        from agentlab.hosting import guard_paid_job
+
+        guard_paid_job(http, request.n)
         if store.get_run(request.run_id) is None:
             raise HTTPException(404, f"No run {request.run_id}")
         if not 1 <= request.n <= 20:
@@ -277,9 +400,13 @@ def create_app(store: Store, ui_dist: Path | None = UI_DIST) -> FastAPI:
         args: Annotated[dict[str, Any], Body()],
         authorization: Annotated[str | None, Header()] = None,
     ) -> Any:
+        from agentlab.hosting import guard_local_only
+
         token = os.environ.get("AGENTLAB_TOKEN")
         if token and authorization != f"Bearer {token}":
             raise HTTPException(401, "Missing or wrong AGENTLAB_TOKEN")
+        if not token:
+            guard_local_only("The store RPC (without AGENTLAB_TOKEN)")
         if method not in rpc:
             raise HTTPException(404, f"No store method {method!r}")
         return rpc[method](args)
@@ -294,7 +421,7 @@ def create_app(store: Store, ui_dist: Path | None = UI_DIST) -> FastAPI:
             raise HTTPException(404, f"No run {run_id}")
         tracing.init(store)  # the replay is recorded as a run in this same store
         try:
-            result = replay_run(store, run_id, agents=demo_agents())
+            result = replay_run(store, run_id, agents=demo_agents(seeded=True))
         except LookupError as e:  # not a demo agent: replay it from its own code with the CLI
             raise HTTPException(400, str(e)) from e
         return ReplayResponse(
@@ -323,6 +450,18 @@ def create_app(store: Store, ui_dist: Path | None = UI_DIST) -> FastAPI:
         results = store.eval_results(eval_run.id)
         runs = [run for r in results if (run := store.get_run(r.run_id))]
         return EvalDetail(eval=_eval_run(eval_run), runs=_summaries(store, runs))
+
+    @app.get("/api/config")
+    def config() -> dict[str, Any]:
+        """What this lab allows, so the UI can show or disable actions (see `hosting.py`)."""
+        from agentlab.hosting import public_config
+
+        return public_config()
+
+    @app.get("/api/showcase")
+    def showcase() -> dict[str, Any]:
+        """The best real examples in this lab, for the home page: picked, not hard-coded."""
+        return _showcase(store)
 
     @app.get("/api/failure-categories")
     def failure_categories() -> dict[str, str]:
@@ -380,6 +519,15 @@ def _fork(f: ForkRow) -> ForkInfo:
         created_at=_utc(f.created_at),
         started_at=_utc(f.started_at) if f.started_at else None,
         finished_at=_utc(f.finished_at) if f.finished_at else None,
+    )
+
+
+def _blame(b: Any) -> BlameInfo:
+    return BlameInfo(
+        **b.model_dump(exclude={"created_at", "started_at", "finished_at"}),
+        created_at=_utc(b.created_at),
+        started_at=_utc(b.started_at) if b.started_at else None,
+        finished_at=_utc(b.finished_at) if b.finished_at else None,
     )
 
 
@@ -443,3 +591,73 @@ def _eval_run(e: EvalRunRow) -> EvalRun:
 def _utc(value: datetime) -> datetime:
     # SQLite drops the timezone (challenges.md C-009); stored times are UTC, so say so in the JSON.
     return value.replace(tzinfo=UTC)
+
+
+def _showcase(store: Store) -> dict[str, Any]:
+    """A high-confidence blame with its run, verification fork and a diff; the largest eval; the
+    latest blame benchmark; an identical replay. Each is None if the lab doesn't have one yet."""
+    result: dict[str, Any] = {
+        "blame": None,
+        "fork": None,
+        "diff": None,
+        "eval": None,
+        "bench": None,
+        "replay": None,
+    }
+    blames = [
+        b
+        for r in store.runs(1000)
+        for b in store.blames_of(r.id)
+        if b.status == "done" and (b.report or {}).get("confidence") == "high"
+    ]
+    if blames:
+        blame = max(blames, key=lambda b: b.created_at)
+        blamed = blame.report["blamed"]
+        (source,) = _summaries(store, [store.get_run(blame.source_run_id)])
+        result["blame"] = {
+            "id": blame.id,
+            "run": source,
+            "step": blamed["step"],
+            "span_id": blamed["span_id"],
+            "verdict": blame.report["verdict"],
+        }
+        fork = store.get_fork(blamed["verification"]["fork_id"])
+        if fork and fork.summary:
+            result["fork"] = {
+                "id": fork.id,
+                "label": fork.label,
+                "passed": fork.summary["fork"]["passed"],
+                "control_passed": (fork.summary["control"] or {}).get("passed"),
+                "n": fork.n,
+                "p_value": fork.summary["p_value"],
+            }
+            fixed = next((r for r in fork.summary["fork"]["runs"] if r["passed"]), None)
+            if fixed:
+                result["diff"] = {"a": source.id, "b": fixed["run_id"]}
+    evals = [
+        e
+        for e in store.eval_runs(200)
+        if e.metrics and not str((e.datasets or [""])[0]).startswith("seeded:")
+    ]
+    if evals:
+        best = max(evals, key=lambda e: (e.task_count, e.started_at))
+        result["eval"] = {"id": best.id, "metrics": best.metrics, "model": best.model}
+    bench = store.latest_benchmark("blame")
+    if bench:
+        proposals = (bench.results or {}).get("proposals", {})
+        result["bench"] = {
+            "failures": (bench.results or {}).get("failures"),
+            "top1": {model: p.get("top1") for model, p in proposals.items()},
+            "precision": ((bench.results or {}).get("verification") or {}).get("precision"),
+        }
+    replay = next(
+        (
+            r
+            for r in store.runs(1000)
+            if r.mode == "replay" and (r.replay_report or {}).get("identical")
+        ),
+        None,
+    )
+    if replay:
+        result["replay"] = {"id": replay.id, "source": replay.parent_run_id}
+    return result

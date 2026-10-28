@@ -4,11 +4,13 @@ The whole project as one narrative: what we built, how it works, and why each pi
 before an interview or a demo. For the file-by-file reading order, see
 [WALKTHROUGH.md](WALKTHROUGH.md).
 
-Claude updates this file at the end of every phase. Last updated: **Phase 5 (2026-10-27)**.
+Claude updates this file at the end of every phase. Last updated: **Phase 9 (2026-10-28)**.
 
 **In one line:** we built a flight recorder for AI agents, a way to replay any recorded run
 exactly, a way to fork a run at any step with one change and *prove* whether the change fixed it,
-and a diff that shows exactly where two runs went different ways.
+a diff that shows exactly where two runs went different ways, and Auto-Blame: one click on a failed
+run names the step at fault and proves it, and a CI gate that stops a fixed failure from coming
+back.
 
 ---
 
@@ -60,12 +62,13 @@ response, and a **hash** of the request. That hash is the key to everything afte
 ## Chapter 2: judging runs (Phase 2)
 
 A recorder alone tells you *what* happened, not whether it was *good*. So we added:
+
 - **A dataset:** 21 tasks, each with a question, the expected outcome in words, and checks.
 - **Checks:**
   - code checks: "called `refund_payment` with P-902", "never called refund";
   - an **LLM judge** that grades meaning, returning structured JSON.
 - **A failure category** for every failed task (`ignored_tool_error`, `false_claim`, …), plus
-  success rate, p50/p95 latency and cost.
+success rate, p50/p95 latency and cost.
 - **Scoring from the stored trace,** not from the agent's memory. So it works on *anyone's* agent.
 
 The UI shows any run as that tree, with a red path to the failure. The best catch was **ALR-999**.
@@ -101,10 +104,11 @@ seq  kind   hash      response
 ### Why a replay matches, step after step
 
 Each step builds on the one before:
+
 - **Step 1's request** is built only from things that haven't changed: the user message, the
-  prompt and the tools. Same request, same hash, so its recorded response is found.
+prompt and the tools. Same request, same hash, so its recorded response is found.
 - **Step 2's request** is step 1's request plus step 1's *responses*. Those responses came from the
-  recording, so step 2's request is identical too. Same hash, so it's found as well.
+recording, so step 2's request is identical too. Same hash, so it's found as well.
 - **Every later step** follows the same way.
 
 ```
@@ -121,8 +125,9 @@ with a `ReplayDivergence` that says *where*. It compares the new request with th
 and prints the path: `$.config.system_instruction`.
 
 **Small details that make it exact:**
+
 - **Two calls with the same hash** (for example a 429 error, then the successful retry) wait in a
-  queue and are served in their original order.
+queue and are served in their original order.
 - **The clock and random numbers** go through `lab.now()` and `lab.random()`, so they replay too.
 - **Tools never run during a replay,** so a refund can never happen twice.
 
@@ -141,15 +146,19 @@ invoke_agent ───────────── = ── invoke_agent
 ```
 
 It matters for three reasons:
+
 1. **Trust.** If a replay with *no* change is identical, then in a fork any difference must come
+
    from *your* change, not from chance. Without this, Fork, Diff and Blame can't prove anything.
 2. **Change detection.** Replaying old runs against new code shows what changed. All 16 old
+
    support runs stopped at the first model call, at `system_instruction`, because the prompt
-   changed; all 14 triage runs, untouched, replayed identically.
+    changed; all 14 triage runs, untouched, replayed identically.
 3. **It finds bugs.** A refund run's answer looked like a hallucination ("P-902 was already
+
    refunded"). Its replay stopped inside an *earlier* tool result. Our tool had returned live data
-   that the refund later changed, so the model was shown a rewritten history. The fix was to copy
-   tool results when they're returned. Without replay, that would have been blamed on the model.
+    that the refund later changed, so the model was shown a rewritten history. The fix was to copy
+    tool results when they're returned. Without replay, that would have been blamed on the model.
 
 ---
 
@@ -166,17 +175,22 @@ step 3 "processed…"        LIVE: the model answers again, with the new prompt
 ```
 
 **How it works, in four ideas:**
+
 1. **Match by position before the fork point.** Changing the prompt changes every request's hash,
+
    so "the 2nd model call gets the 2nd recorded reply" instead. After the fork point, everything
-   is live.
+    is live.
 2. **Apply the change at the boundary.** The wrapped Gemini client swaps the prompt or model on
+
    live calls, so it works even for a customer's agent whose code we can't edit.
 3. **Keep the world consistent.** The step-2 refund is served from the recording *and* re-applied
+
    to the simulated backend (event sourcing), so step 3 sees P-902 as refunded. A write tool with
-   no simulator stops the fork rather than touching a real system.
+    no simulator stops the fork rather than touching a real system.
 4. **Prove it with statistics.** The live part is random, so a fork runs **N times with the change
+
    and N times without it** (the control). Each run is scored with the original task's checks, and
-   Fisher's exact test says how likely the gap would be by luck.
+    Fisher's exact test says how likely the gap would be by luck.
 
 **The demo, live:** the refund task's failure (the agent never gave the refund ID), forked at
 step 3 with one sentence added to the prompt:
@@ -202,11 +216,12 @@ ALR-999 run (failed)
 ```
 
 Three lessons to retell:
+
 - **A fix that reads well can fail 5 times out of 5.**
 - **A fork is only as good as its checks.** An LLM judge missed invented IDs that a one-line
-  exact check catches.
+exact check catches.
 - **Controls matter.** The same control passed 3/5 in one batch and 0/5 in another, so one run
-  proves nothing.
+proves nothing.
 
 **Where forks run:** the lab never runs your agent. "Fork" in the UI queues a job; a **worker**
 with the agent's code claims it and sends the runs back:
@@ -241,10 +256,11 @@ step 3   "I've processed a refund…"
 **Step 2: line them up.** You can't just compare step 3 with step 3: if one run does an extra
 check, every later step shifts. This is the problem `diff` solves for lines of code and biologists
 solve for DNA. We use **Needleman–Wunsch**:
+
 - Fill a table where each cell is the best score for lining up the first *i* steps of A with the
-  first *j* of B.
+first *j* of B.
 - Each cell picks the best of three moves: *pair* these two steps (scored by how similar they
-  are), or *skip* one of them (a gap, with a penalty).
+are), or *skip* one of them (a gap, with a penalty).
 - Read the answer back from the corner.
 
 Because pairs are scored by *similarity* (same tools? same arguments? same results? same words?),
@@ -292,29 +308,127 @@ challenge.
 
 ---
 
-## What comes next, on top of fork and diff
+## Chapter 6: Auto-Blame, the step at fault, proved (Phase 6)
 
-### Auto-Blame (Phase 6)
-
-Fork lets *you* test a guess about which step was wrong; diff shows how runs differ. Blame makes
-the guess itself, then proves it:
-1. A judge reads a failed run and ranks candidate "first wrong steps", each with a correction.
-2. Fork each candidate with its correction, N times with controls (Chapter 4).
-3. The step whose correction turns failures into passes is confirmed as the cause.
-4. The diff of the winning fork against the original shows exactly what changed.
+Fork lets *you* test a guess about which step went wrong. Blame makes the guess itself, then proves
+it.
 
 ```
-ALR-999 run (failed)
-├─ candidate: step 1 (get_alert call)    fork → 0/5   not the cause
-└─ candidate: step 2 (switched alerts)   fork → 5/5 vs control 0/5, p = 0.008   ✓ confirmed
+failed run ──► judge proposes            ──► forks verify                     ──► verdict
+               #1 step 3 + a correction       step 3 + correction ×5 vs control ×5
+               #2 step 2 + a correction       (then the same fix at step 4: still saves it?)
 ```
 
-The three manual ALR-999 forks from Chapter 4 are exactly what Blame will automate, including the
-trap from fork 2: a "fix" that only fools the checks. Blame will be measured on a catalogue of
-deliberately planted bugs, where the guilty step is known.
+1. **Propose.** A judge reads the run as numbered steps, the expected outcome, the failed checks
 
-**The pitch:** "Other tools let you rerun from a step. We tell you *which* step was wrong, prove
-it by forking against a control, and show you the exact diff."
+   and the agent's system prompt. It ranks up to three "first wrong steps", each with a correction
+    written as a prompt rule.
+2. **Verify.** Fork at the candidate step with the correction, 5 times, next to 5 controls without
+
+   it. If the correction clearly wins, the candidate is confirmed; if not, try the next one.
+3. **Pin down.** Apply the same correction one step *later*. If that no longer saves the run, the
+
+   step was **decisive**, the point of no return. If it still does, the mistake was **recoverable**
+    and the judge may have blamed too early.
+4. **Abstain** if nothing is confirmed: "not proved", with the judge's guess marked unproven.
+
+**The demo, one click on the real refund-ID failure:**
+
+```
+judge:  "The refund at step 2 was right; step 3's answer left out RF-1001."
+        #1 step 3 · correction: "When reporting a successful refund, always include the refund ID."
+verify: corrected 5/5 vs control 0/5 → confirmed
+Step 3 is at fault. Verified: with the correction 5/5 runs pass, without it 0/5 (p = 0.008).
+It is the last step, so it is decisive.                                    ✓ high confidence
+```
+
+### How do we know it's right? Plant the bugs ourselves
+
+Real failures don't come labelled. So we planted 10 bugs, each one bad line in an agent's prompt
+("always refund the *original* payment", "if an alert doesn't exist, quietly investigate another
+one"), each with a matcher that recognises the step where it shows. Running them gave **50 failures
+whose guilty step is known**. Two bugs barely fired: the model trusted the logs, or a tool's
+description, over the bad line.
+
+**Results on the 50 seeded failures:**
+
+```
+                      top-1   top-3   within one step   cost per case
+Flash-Lite judge       72%     78%         94%            $0.0007
+Flash judge            92%     92%        100%            $0.0031
+"always blame the last step" baseline: 30%
+```
+
+### The surprise: the judge was right, but couldn't prove it
+
+On 9 sampled cases verified by forking, the judge's first guess was right **8 times**, yet only
+**4** were confirmed. Every confirmed blame was right (precision 100%), but it abstained on more
+than half. Why? The judge never saw the agent's prompt, so its corrections were generic advice
+("carefully copy order numbers") that lost to the planted instruction they contradicted ("swap the
+last two digits"). The fix: show the judge the system prompt, and have its correction override the
+bad line explicitly. Re-measuring with the improved judge is one command (`lab blame-bench
+--verify 9 -n 3`); the first attempt stalled on a Gemini quota limit, so that number is still to come.
+
+**Lessons to retell:**
+
+- A judge can be *right* without being *useful*: a blame you can't act on can't be proved.
+- Verification should cost precision nothing: when it can't prove a blame, it says so.
+- What the judge sees decides what it can fix.
+
+---
+
+## Chapter 7: Lock it in, so it never comes back (Phase 7, cut down)
+
+Blame proved the refund-ID fix. The last question every team asks: *"how do I stop this from
+coming back?"*
+
+1. **Save the failure as a regression test.** One click ("🔒 Save as regression test", or
+   `lab lock-in`) writes a task to `datasets/regressions.jsonl`: the same customer message, the
+   original checks, and one more check built from the proved correction ("always include the refund
+   ID"). It remembers which run and which blame it came from.
+2. **Gate CI on it.** `lab eval datasets/*.jsonl --gate 0.9` exits with code 1, which blocks the
+   merge, if the pass rate drops below 90% *or any regression test fails*. Regressions are
+   zero-tolerance: you already paid for that bug once.
+
+**Seen live:**
+
+```
+lab lock-in 710849a3          → saved regression-support-refund-request-710849a3
+lab eval regressions --gate   → GATE FAILED: regression … failed again: answer is missing 'RF-1001'
+(ship the proved fix in the support prompt)
+lab eval regressions --gate   → GATE PASSED: 100% ≥ 90%, no regressions        (exit 0)
+```
+
+**A subtle fix along the way:** once the support prompt was fixed, forks of the *old* failing run
+would have used the fixed prompt in their controls, so "without the correction" would pass and
+Blame would stop confirming the original failure. Forks now keep the prompt the run was recorded
+with, unless the prompt is what you're changing. A counterfactual's baseline is the run as it
+happened, not the code as it is today.
+
+**The whole loop, which is the demo:**
+
+```
+find it (eval) → 🔍 blame: step 3, proved 5/5 vs 0/5 → ⑂ fork: try your own fix → ⇄ diff: see what
+changed → 🔒 lock it in → CI gate blocks it if it ever comes back
+```
+
+---
+
+## Chapter 8: Showing it (Phase 9)
+
+A demo nobody can open isn't proof. So the lab is now hostable, and calm enough for a first-time
+visitor:
+- **Overview** is the front door: one sentence on what it does, four real numbers, and the loop,
+  each step linked to the real run, blame, fork or diff that proves it.
+- **The run page** tells one story at a time: an action row, a banner ("⚑ Step 3 is at fault,
+  verified 5/5 vs 0/5"), and tabs.
+- **Hosted, but safe:** the UI on Vercel or Netlify, the backend in a container. Anyone can browse
+  and **replay** (free); **fork** and **blame** spend real model calls, so they need a demo key and
+  are capped per hour.
+- **The pitch kit:** a 2-minute script that tells the whole loop in one story, a technical write-up,
+  and a note per target company saying which feature to lead with.
+
+The one-line pitch hasn't changed: *others let you rerun; we tell you where, and prove it.*
 
 ---
 
@@ -330,6 +444,10 @@ Evals tab → eval report (success %, p50/p95, failure chart)
                     └─ fork page: 5/5 vs 0/5, p-value, verdict, every run (⇄ diff vs source)
         └─ Compare with (source, or other runs of the task) → ⇄ Diff
               └─ diff page: first divergence, effects, steps side by side, answer diff
+        └─ 🔍 Blame (failed runs) → blame page: verdict + confidence, candidates, fork evidence
+              └─ back on the run: ⚑ on the blamed step · 🔒 Save as regression test
+Blame accuracy tab → judges' top-1/top-3 on seeded failures, verified accuracy, history
 Runs tab  → every run ("Show replays and forks" reveals them)
-CLI       → lab run · lab eval · lab replay · lab fidelity · lab fork · lab diff · lab worker · lab ui
+CLI       → lab run · eval [--gate] · replay · fidelity · fork · diff · blame · lock-in ·
+            seed-failures · blame-bench · worker · ui
 ```

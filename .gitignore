@@ -7,3 +7,6 @@ __pycache__/
 *.db
 dist/
 .agentlab/
+
+# Per-company pitch notes: private (decisions.md D-055)
+pitch/private/

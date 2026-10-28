@@ -1,0 +1,10 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# Send API calls to the backend, so the UI and API share one origin (no CORS needed).
+[[redirects]]
+  from = "/api/*"
+  to = "https://YOUR-BACKEND-URL/api/:splat"
+  status = 200
+  force = true

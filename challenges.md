@@ -45,11 +45,16 @@ Entries marked _anticipated_ were identified during planning and have not been h
   - Tests cover all four cases, including a write tool with no simulator, whose real function
     must never be called.
 
-## C-004 — Ground truth for Auto-Blame _(anticipated)_
+## C-004 — Ground truth for Auto-Blame _(resolved)_
 - **Problem:** To measure whether blame finds the right step we need runs where the faulty step is
   known, and real failures rarely come labelled.
 - **Resolution:** Open. Plan: a seeded failure catalog of deliberately injected bugs, plus
   fork-based verification as a second signal.
+- **Resolved 2026-10-28 (Phase 6):**
+  - 10 seeded prompt bugs (`blame/catalog.py`), each with a matcher that finds its guilty step.
+  - `lab seed-failures` ran them through the normal eval runner; failed runs where the matcher
+    fires are the labelled cases.
+  - Fork-based verification is the second signal (D-047, D-048).
 
 ## C-005 — Replaying Gemini conversations exactly _(resolved)_
 - **Problem:** Gemini responses can carry thinking and function-call parts that must go back to the
@@ -190,3 +195,36 @@ Entries marked _anticipated_ were identified during planning and have not been h
 - **Idea:** a second view that compares the *set of calls made so far* at each point (or aligns
   individual tool calls rather than steps), so parallel and sequential versions of the same work
   line up. The step view stays the default, because steps are the unit you fork from.
+
+## C-020 — Some planted bugs don't fire _(accepted)_
+- **Problem:** The model sometimes ignores a planted bad instruction when the evidence contradicts
+  it:
+  - `blame-deploy` ("always blame the latest deploy") never fired in 5 runs, because the logs
+    plainly blamed the card provider;
+  - `voided-is-charged` fired in only some runs, because `get_payments`'s docstring explains what a
+    voided authorization is;
+  - `obey-notes` fired 3 times in 5.
+- **Resolution:** Only failed runs where the bug's matcher fires count as cases, so the benchmark
+  isn't polluted. The bugs that don't fire are a finding in themselves: tool descriptions and
+  strong evidence can outweigh a bad system-prompt line.
+
+
+## C-021 — Fixing the agent would have broken the blame demo _(resolved before it bit)_
+- **Problem:** Shipping the refund-ID fix to the support prompt would make every *control* in
+  future forks of the old failing run use the fixed prompt (live calls used the current code). So
+  "without the correction" would pass too, and Blame would no longer confirm the failure it had
+  found. That isn't wrong, but it is a different question from "what if, in that run, step 3 had
+  been different?".
+- **Resolution:** Forks keep the recorded system prompt unless the override changes it (D-051).
+  A test fixes the prompt "in code" and checks that a control still fails.
+
+## C-022 — The "after" benchmark hung silently for 40 minutes _(resolved)_
+- **Problem:** The benchmark process sat at 0% CPU with no database writes. Retries waited "at
+  least as long as the server asks" (D-017), with no upper bound. When a daily quota runs out,
+  Gemini asks for a wait of hours, so the process slept.
+- **Also:** the helper that was meant to start a job "after the benchmark finishes" used
+  `pgrep -f "lab blame-bench"`, which matched its *own* command line, so it would have waited
+  forever.
+- **Resolution:** `RetryPolicy.max_hint_s` (120s). A longer hint fails at once with "probably a
+  quota limit; not retrying", and a test covers it. The "after" benchmark wasn't rerun; the
+  "before" numbers stand, and the rerun is one command (`lab blame-bench --verify 9 -n 3`).

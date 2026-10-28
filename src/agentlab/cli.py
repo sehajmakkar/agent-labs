@@ -35,7 +35,8 @@ TIERS = ["flash", "flash-lite"]
 
 
 def main(argv: list[str] | None = None) -> int:
-    agents = demo_agents()
+    # Seeded-bug variants are included, so their runs can be replayed, forked and blamed.
+    agents = demo_agents(seeded=True)
     parser = argparse.ArgumentParser(prog="lab", description="Agent Reliability Lab")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -62,6 +63,17 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--concurrency", type=int, default=4)
     ev.add_argument("--max-steps", type=int, default=10)
     ev.add_argument("--timeout", type=float, default=120, help="seconds per task")
+    ev.add_argument(
+        "--gate",
+        type=float,
+        help="CI gate: exit 1 if the success rate is below this (0–1) or any regression test fails",
+    )
+
+    sn = commands.add_parser("snapshot", help="copy the trace store, compressed, to seed a host")
+    sn.add_argument("--out", default="deploy/seed.db.gz")
+
+    lk = commands.add_parser("lock-in", help="save a failed run as a regression test")
+    lk.add_argument("run_id", help="a failed run from an eval task (an ID prefix is enough)")
 
     evals = commands.add_parser("evals", help="list recent eval runs")
     evals.add_argument("--limit", type=int, default=20)
@@ -110,6 +122,28 @@ def main(argv: list[str] | None = None) -> int:
     df.add_argument("run_a", help="a run ID, or the start of one")
     df.add_argument("run_b", help="a run ID, or the start of one")
 
+    bl = commands.add_parser(
+        "blame", help="find the step that made a failed run fail, and prove it"
+    )
+    bl.add_argument("run_id", help="a failed run from an eval task (an ID prefix is enough)")
+    bl.add_argument("-n", type=int, default=5, help="runs per verification fork and control")
+    bl.add_argument("-k", type=int, default=2, help="verify at most this many candidates")
+    bl.add_argument("--judge-model", choices=TIERS, default="flash-lite")
+
+    bb = commands.add_parser("blame-bench", help="blame accuracy on the seeded failures")
+    bb.add_argument("--judges", default="flash-lite,flash", help="judge models to compare")
+    bb.add_argument(
+        "--verify", type=int, default=0, help="also run full blame on this many failures"
+    )
+    bb.add_argument("-n", type=int, default=3, help="runs per fork when verifying")
+    bb.add_argument(
+        "--no-prompt", action="store_true", help="hide the agent's system prompt from the judge"
+    )
+
+    sd = commands.add_parser("seed-failures", help="run the seeded bugs to make failures to blame")
+    sd.add_argument("--runs", type=int, default=5, help="runs per seeded bug")
+    sd.add_argument("--bugs", help="only these bug IDs, comma-separated")
+
     ui = commands.add_parser("ui", help="serve the web UI and its API")
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8000)
@@ -127,6 +161,10 @@ def main(argv: list[str] | None = None) -> int:
         return _show(Store(settings.db_path), args.run_id)
     if args.command == "diff":
         return _diff(Store(settings.db_path), args.run_a, args.run_b)
+    if args.command == "snapshot":
+        return _snapshot(settings, args.out)
+    if args.command == "lock-in":
+        return _lock_in(Store(settings.db_path), settings, args.run_id)
     if args.command == "evals":
         return _evals(Store(settings.db_path), args.limit)
     if args.command == "report":
@@ -154,6 +192,12 @@ def main(argv: list[str] | None = None) -> int:
         return _eval(llm, settings, agents, args)
     if args.command == "fork":
         return _fork(llm, settings, agents, args)
+    if args.command == "seed-failures":
+        return _seed(llm, settings, agents, args)
+    if args.command == "blame":
+        return _blame(llm, settings, agents, args)
+    if args.command == "blame-bench":
+        return _blame_bench(llm, settings, agents, args)
     if args.command == "worker":
         return _worker(llm, settings, agents, args)
     return _run(llm, settings, agents[args.agent], args)
@@ -228,7 +272,20 @@ def _eval(
         on_result=progress,
     )
     print()
-    return _report(store, eval_id)
+    _report(store, eval_id)
+    if args.gate is None:
+        return 0
+    from agentlab.evals.regressions import check_gate
+
+    gate = check_gate(store.eval_results(eval_id), {t.id: t for t in tasks}, args.gate)
+    print()
+    if gate.passed:
+        print(f"GATE PASSED: {gate.success_rate:.0%} ≥ {gate.threshold:.0%}, no regressions")
+        return 0
+    print("GATE FAILED:")
+    for reason in gate.reasons:
+        print(f"  ✗ {reason}")
+    return 1
 
 
 def _replay(settings: Settings, agents: dict[str, Agent], run_id: str, entry: str | None) -> int:
@@ -314,6 +371,44 @@ def _diff(store: Store, run_a: str, run_b: str) -> int:
     return 0
 
 
+def _snapshot(settings: Settings, out: str) -> int:
+    from agentlab.hosting import snapshot
+
+    try:
+        size = snapshot(settings.db_path, out)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"wrote {out} ({size / 1e6:.1f} MB): the hosted lab starts from it (deploy/start.sh)")
+    return 0
+
+
+def _lock_in(store: Store, settings: Settings, run_id: str) -> int:
+    from agentlab.evals.regressions import REGRESSIONS_FILE, lock_in
+    from agentlab.evals.tasks import load_tasks
+
+    try:
+        run = store.find_run(run_id)
+        task, created = lock_in(
+            store,
+            run.id,
+            tasks=load_tasks(settings.datasets_dir),
+            datasets_dir=settings.datasets_dir,
+        )
+    except (LookupError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    where = f"{settings.datasets_dir}/{REGRESSIONS_FILE}"
+    print(f"{'saved' if created else 'already saved'}: {task.id} in {where}")
+    if task.origin and task.origin.get("correction"):
+        print(
+            f"  extra check from blame (step {task.origin['blamed_step']}): "
+            f"{task.origin['correction']}"
+        )
+    print(f"  run it in CI: lab eval {settings.datasets_dir}/*.jsonl --gate 0.9")
+    return 0
+
+
 def _evals(store: Store, limit: int) -> int:
     rows = store.eval_runs(limit)
     if not rows:
@@ -396,7 +491,7 @@ def _fork(
 ) -> int:
     import json
 
-    from agentlab.fork.point import resolve_fork_point
+    from agentlab.fork.point import recorded_system_prompt, resolve_fork_point
     from agentlab.fork.runner import execute_fork
     from agentlab.replay.runner import load_entry
     from agentlab.replay.session import Override
@@ -412,7 +507,7 @@ def _fork(
 
     prompt = args.prompt
     if args.append_prompt:
-        prompt = (_recorded_prompt(store, source.id) or "") + "\n" + args.append_prompt
+        prompt = (recorded_system_prompt(store, source.id) or "") + "\n" + args.append_prompt
     model = settings.model_for(args.model) if args.model in TIERS else args.model
     override = Override(
         system_prompt=prompt,
@@ -485,6 +580,196 @@ def _worker(
     return 0
 
 
+def _seed(
+    llm: GeminiClient, settings: Settings, agents: dict[str, Agent], args: argparse.Namespace
+) -> int:
+    from agentlab.blame.bench import seed_failures, seeded_failures
+    from agentlab.blame.catalog import BUGS, BUGS_BY_ID
+    from agentlab.evals import LLMJudge
+    from agentlab.evals.tasks import load_tasks
+
+    store = tracing.init(settings.db_path)
+    bugs = [BUGS_BY_ID[b] for b in args.bugs.split(",")] if args.bugs else BUGS
+    print(f"seeding {len(bugs)} bugs × {args.runs} runs on {settings.flash_lite_model} …\n")
+
+    def progress(bug, outcome) -> None:
+        mark = "✓ passed anyway" if outcome.passed else f"✗ {outcome.category}"
+        print(f"  {bug.id:18} {outcome.run_id[:8]}  {mark}", flush=True)
+
+    seed_failures(
+        store,
+        llm=llm,
+        model=settings.flash_lite_model,
+        agents=agents,
+        tasks=load_tasks(settings.datasets_dir),
+        judge=LLMJudge(llm, settings.flash_lite_model),
+        runs=args.runs,
+        bugs=bugs,
+        on_result=progress,
+    )
+    failures = seeded_failures(store)
+    print(f"\n{len(failures)} seeded failures with a known guilty step are ready to blame")
+    return 0
+
+
+def _blame(
+    llm: GeminiClient, settings: Settings, agents: dict[str, Agent], args: argparse.Namespace
+) -> int:
+    from agentlab.blame.propose import BlameJudge
+    from agentlab.blame.runner import execute_blame
+
+    store = tracing.init(settings.db_path)
+    try:
+        source = store.find_run(args.run_id)
+    except LookupError as e:
+        print(e, file=sys.stderr)
+        return 1
+    judge_model = settings.model_for(args.judge_model)
+    blame_id = store.create_blame(
+        source_run_id=source.id,
+        judge_model=judge_model,
+        n=args.n,
+        max_candidates=args.k,
+        status="running",
+        worker="cli",
+    )
+    context = _fork_context(llm, settings, agents, judge=True)
+    shown: set = set()
+
+    def progress(report: dict) -> None:
+        if "proposal" not in shown:
+            shown.add("proposal")
+            print(f"judge ({report['judge_model']}): {report['analysis']}\n")
+            for c in report["candidates"]:
+                print(f"  #{c['rank']} step {c['step']}: {c['reasoning']}")
+                print(f"      correction: {c['correction']}")
+            print()
+        for c in report["candidates"]:
+            v = c["verification"]
+            if v and c["rank"] not in shown:
+                shown.add(c["rank"])
+                later = (
+                    f", one step later {v['later_passed']}/{v['n']}"
+                    if v["later_passed"] is not None
+                    else ""
+                )
+                print(
+                    f"  verify step {c['step']}: corrected {v['passed']}/{v['n']} vs control "
+                    f"{v['control_passed']}/{v['n']}{later} → {v['status']}"
+                )
+
+    print(f"blaming {source.id[:8]} ({source.task_id}) …\n")
+    try:
+        report = execute_blame(
+            store,
+            store.get_blame(blame_id),
+            blame_judge=BlameJudge(llm, judge_model),
+            tasks=context["tasks"],
+            fork_context=context,
+            on_progress=progress,
+        )
+    except Exception as e:
+        store.finish_blame(blame_id, error=f"{type(e).__name__}: {e}")
+        print(e, file=sys.stderr)
+        return 1
+    store.finish_blame(blame_id, report=report)
+    print(f"\nblame {blame_id[:8]} · confidence {report['confidence'] or 'none'}")
+    print(report["verdict"])
+    return 0
+
+
+def _blame_bench(
+    llm: GeminiClient, settings: Settings, agents: dict[str, Agent], args: argparse.Namespace
+) -> int:
+    from agentlab.blame.bench import benchmark_proposals, benchmark_verification, seeded_failures
+    from agentlab.blame.propose import BlameJudge
+    from agentlab.blame.runner import execute_blame
+
+    store = tracing.init(settings.db_path)
+    failures = seeded_failures(store)
+    if not failures:
+        print("No seeded failures yet. Run: lab seed-failures", file=sys.stderr)
+        return 1
+    context = _fork_context(llm, settings, agents, judge=True)
+    judges = {tier: BlameJudge(llm, settings.model_for(tier)) for tier in args.judges.split(",")}
+    print(
+        f"{len(failures)} seeded failures; judges: {', '.join(j.model for j in judges.values())}\n"
+    )
+    proposals = benchmark_proposals(
+        store,
+        failures,
+        judges={j.model: j for j in judges.values()},
+        tasks=context["tasks"],
+        with_prompt=not args.no_prompt,
+        on_result=lambda judge, f, rank: print(
+            f"  {judge:24} {f.bug.id:18} guilty step {f.guilty_step}: "
+            + (f"ranked #{rank}" if rank else "missed"),
+            flush=True,
+        ),
+    )
+    results: dict = {
+        "failures": len(failures),
+        "judge_sees_prompt": not args.no_prompt,
+        "proposals": proposals,
+    }
+
+    if args.verify:
+        sample = _one_per_bug(failures)[: args.verify]
+        judge_model = settings.flash_lite_model
+        print(f"\nverifying {len(sample)} failures by forking (n={args.n}) …")
+        results["verification"] = benchmark_verification(
+            store,
+            sample,
+            judge_model=judge_model,
+            n=args.n,
+            max_candidates=2,
+            run_blame=lambda blame_id: execute_blame(
+                store,
+                store.get_blame(blame_id),
+                blame_judge=BlameJudge(llm, judge_model),
+                tasks=context["tasks"],
+                fork_context=context,
+            ),
+            on_result=lambda f, c: print(
+                f"  {f.bug.id:18} guilty {f.guilty_step} · proposed {c['proposed']} · "
+                f"verified {_or_none(c['blamed'])} ({c['confidence'] or '-'})",
+                flush=True,
+            ),
+        )
+    bench_id = store.save_benchmark("blame", results)
+    print(f"\nbenchmark {bench_id[:8]} on {len(failures)} seeded failures")
+    for model, r in proposals.items():
+        print(
+            f"  {model:24} top-1 {r['top1']:.0%} · top-3 {r['top3']:.0%} · within one step "
+            f"{r['within1']:.0%} · (always-last-step baseline {r['last_step_baseline']:.0%})"
+        )
+    if "verification" in results:
+        v = results["verification"]
+        precision = "–" if v["precision"] is None else f"{v['precision']:.0%}"
+        print(
+            f"  verified ({v['cases']} cases, n={v['n']}): accuracy {v['verified_accuracy']:.0%} · "
+            f"precision {precision} · abstained {v['abstained']:.0%}"
+        )
+    return 0
+
+
+def _or_none(value: object) -> str:
+    return "none" if value is None else str(value)
+
+
+def _one_per_bug(failures: list) -> list:
+    """Round-robin across bugs, so a small sample covers as many bugs as possible."""
+    by_bug: dict[str, list] = {}
+    for f in failures:
+        by_bug.setdefault(f.bug.id, []).append(f)
+    ordered = []
+    while any(by_bug.values()):
+        for bug_failures in by_bug.values():
+            if bug_failures:
+                ordered.append(bug_failures.pop(0))
+    return ordered
+
+
 def _find_span(store: Store, run_id: str, *, step: int | None, tool: str | None) -> str:
     spans = store.spans(run_id)
     for s in spans:
@@ -502,15 +787,6 @@ def _find_span(store: Store, run_id: str, *, step: int | None, tool: str | None)
     if step is not None and not has_steps and 0 < step <= len(model_calls):
         return model_calls[step - 1].id
     raise LookupError(f"Run {run_id[:8]} has no " + (f"step {step}" if step else f"call to {tool}"))
-
-
-def _recorded_prompt(store: Store, run_id: str) -> str | None:
-    """The system prompt the run's first model call was sent."""
-    for r in store.run_recordings(run_id):
-        if r.kind == "llm":
-            instruction = (r.request.get("config") or {}).get("system_instruction")
-            return instruction if isinstance(instruction, str) else None
-    return None
 
 
 def _models(llm: GeminiClient, settings: Settings) -> int:

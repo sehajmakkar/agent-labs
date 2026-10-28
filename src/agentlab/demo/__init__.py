@@ -8,7 +8,14 @@ real is touched.
 from agentlab.loop import Agent
 
 
-def demo_agents() -> dict[str, Agent]:
+def demo_agents(*, seeded: bool = False) -> dict[str, Agent]:
+    """The demo agents by name. With `seeded`, also each seeded-bug variant (blame/catalog.py),
+    which replay, fork and blame need to rerun those runs' code."""
     from agentlab.demo import support, triage
 
-    return {a.name: a for a in (support.AGENT, triage.AGENT)}
+    agents = {a.name: a for a in (support.AGENT, triage.AGENT)}
+    if seeded:
+        from agentlab.blame.catalog import seeded_agents
+
+        agents |= seeded_agents(agents)
+    return agents

@@ -165,6 +165,7 @@ Refund policy: you may call refund_payment only when the customer asks for a ref
 is a duplicate: a second captured payment of the same amount for the same order. Refund only the
 later duplicate, never the original. For any other refund request, say it will be passed to the
 billing team. Never say a refund was issued unless refund_payment succeeded.
+When a refund succeeds, tell the customer its refund ID and when the money will arrive.
 Keep replies short and friendly."""
 
 AGENT = Agent(

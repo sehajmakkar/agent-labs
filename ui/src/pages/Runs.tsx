@@ -9,15 +9,19 @@ export function Runs() {
   const [agent, setAgent] = useState("");
   const [failedOnly, setFailedOnly] = useState(false);
   const [showReplays, setShowReplays] = useState(false);
+  const [showSeeded, setShowSeeded] = useState(false);
   const runs = useLoad(() => api.runs(), "runs");
 
   const rows = (runs.data ?? []).filter(
     (r) =>
       (!agent || r.agent_name === agent) &&
       (!failedOnly || isFailure(r)) &&
-      (showReplays || r.mode === "record"),
+      (showReplays || r.mode === "record") &&
+      (showSeeded || !r.agent_name.includes("~")),
   );
-  const agents = [...new Set((runs.data ?? []).map((r) => r.agent_name))].sort();
+  const agents = [...new Set((runs.data ?? []).map((r) => r.agent_name))]
+    .filter((a) => showSeeded || !a.includes("~"))
+    .sort();
 
   return (
     <div className="page">
@@ -45,6 +49,10 @@ export function Runs() {
               onChange={(e) => setShowReplays(e.target.checked)}
             />
             Show replays and forks
+          </label>
+          <label className="checkbox" title="Runs of agents with a deliberately planted bug, used to measure Auto-Blame">
+            <input type="checkbox" checked={showSeeded} onChange={(e) => setShowSeeded(e.target.checked)} />
+            Show seeded-bug runs
           </label>
           <button onClick={runs.reload}>Refresh</button>
         </div>

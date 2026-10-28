@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { api, type Override, type RunSummary, type Span } from "../api";
+import { useConfig } from "../lib/config";
 import { navigate, useLoad } from "../lib/hooks";
 
 /**
@@ -32,7 +33,8 @@ export function ForkDialog({
   const [toolOutput, setToolOutput] = useState(
     span.kind === "tool" ? JSON.stringify(span.output, null, 2) : "",
   );
-  const [n, setN] = useState(5);
+  const config = useConfig();
+  const [n, setN] = useState(Math.min(5, config.max_n));
   const [control, setControl] = useState(true);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -127,7 +129,7 @@ export function ForkDialog({
             <input
               type="number"
               min={1}
-              max={20}
+              max={config.max_n}
               value={n}
               onChange={(e) => setN(Number(e.target.value))}
             />
