@@ -744,3 +744,31 @@ Lead with one story told end to end, not the feature list:
 failure → blame → proof → diff → lock it in. Put real numbers on the first screen, link to the
 exact page that proves each claim, and tailor the *first* feature shown to what the company already
 builds: diff for experiment tools, blame for root-cause tools, lock-in for monitoring tools.
+
+### A static export: the API as files (D-057)
+A read-only demo doesn't need a server if every answer the UI could ask for is saved ahead of time.
+`lab export-static` uses FastAPI's **test client** to call the real API in-process and writes each
+answer to a file named after its URL (`/api/runs/x` → `data/runs/x.json`). The UI's static build
+swaps `fetch("/api/...")` for those files. Three things to get right:
+- **Crawl from the links**, not from the tables: start at the run list, follow each run to its
+  forks and blames, each blame to its verification forks. Then every link in the UI has a file.
+- **Some answers are infinite.** A diff exists for every pair of runs, so export only the pairs the
+  UI links to, and give the UI an index (`diffs.json`) so it offers only those.
+- **A missing file may not look missing.** Many static hosts answer an unknown path with the
+  site's index page and status 200, so check the response really is JSON.
+
+Vite's **mode** (`vite build --mode static`) sets both `import.meta.env.MODE` in the app and which
+folder is copied into the site (`publicDir`), so one flag switches the whole build, and the hosts
+need no environment variables.
+
+### Honest pre-computation
+Forks run ahead of time ("presets") give a visitor the feeling of forking without spending money or
+risking a failure. They stay honest because the dialog and the fork page both say when they were
+run, and every number is the real result of that run.
+
+### Generated data in git: one reproducible archive
+Committing thousands of generated files makes every refresh a giant, unreadable change. Pack them
+into one archive instead, and make it **reproducible**: the same input must give the same bytes,
+or git shows a change every time. That means sorted file order, fixed timestamps and owners in the
+tar entries, and a gzip header with no time *and no file name* (gzip stores the original name; a
+test that packed the same folder to two names caught that).

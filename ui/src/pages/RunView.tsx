@@ -45,7 +45,7 @@ export function RunView({
             <h1>{run.task_id ?? run.agent_name}</h1>
             <Outcome run={run} />
           </div>
-          <RunActions run={run} blames={blames} />
+          <RunActions run={run} blames={blames} replays={replays} />
         </div>
         <div className="run-meta">
           {run.agent_name} · {run.model} · {seconds(activeSeconds(run))} · {tokens(run.tokens)} tokens ·{" "}

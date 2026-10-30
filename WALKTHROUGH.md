@@ -424,7 +424,12 @@ Read these in order, after Step 9: a fork is a replay that goes live part-way.
    for secrets).
 43. 🆕 **[Dockerfile](Dockerfile)**, **[deploy/start.sh](deploy/start.sh)**,
    **[ui/vercel.json](ui/vercel.json)** and **[DEPLOY.md](DEPLOY.md)** ★ (10 min): how the container
-   is built and seeded, and how Vercel proxies `/api`.
+   is built and seeded, and how Vercel proxies `/api` (the live option).
+    - 🆕 **[src/agentlab/static_export.py](src/agentlab/static_export.py)** ★★ (10 min): the
+      read-only demo (D-057). How the real API is crawled in-process and saved as files, which diff
+      pairs are exported, and how preset forks are checked. Then `staticUrl` and `getStatic` in
+      [ui/src/api.ts](ui/src/api.ts) and [ui/src/components/PresetForks.tsx](ui/src/components/PresetForks.tsx)
+      for the UI side.
 
 ### Step 15: the demo agents and the CLI
 
@@ -978,4 +983,9 @@ boundary is the SDK client, not our loop.
   - telling one story.
 - **Try:** `docker build -t agentlab . && docker run -p 8000:8000 -e AGENTLAB_DEMO_KEY=x agentlab`,
   then open http://localhost:8000. Blame is greyed out until you enter the key with 🔑.
+- **Then the read-only demo (D-057):** `lab export-static` saves every page's data as JSON;
+  `npm run build:static` makes a UI that reads those files, with forks run ahead of time as presets.
+  Try: `uv run lab export-static && (cd ui && npm run build:static) && (cd ui/dist && python3 -m
+  http.server 4173)`, open http://localhost:4173, then "Try a fork yourself". Open
+  `ui/static/data/presets.json` and find each preset's fork file next to it.
 

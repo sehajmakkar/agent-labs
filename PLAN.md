@@ -683,7 +683,8 @@ injection through tool output.
 
 - [x] UI made readable for a first-time visitor: an Overview page built from real examples, a calmer run page with tabs and one action row, seeded runs hidden (D-056)
 - [x] Hosting, live (D-054): a Dockerfile (UI + API + worker), `deploy/start.sh`, `lab snapshot` (scanned for keys), Vercel and Netlify configs, guarded hosted mode (`hosting.py`), and DEPLOY.md. Verified in a local container: it seeds itself, is public, the store RPC returns 403, Replay works without a key, Blame is greyed out without one
-- [ ] **Deploy it** (your accounts): the backend on Fly, Render or Railway, then the UI on Vercel or Netlify. Follow DEPLOY.md, then replace `DEMO_URL` in the README
+- [x] Read-only hosting with preset forks (D-057, chosen over the live backend): `lab export-static`, `npm run build:static`, preset forks (`deploy/presets.json`: the real fix 5/5 vs 0/5, vague advice 0/5 vs 0/5, Flash 5/5 vs 0/5), static Vercel and Netlify configs; the data is committed as one reproducible archive, `ui/static-data.tar.gz` (D-058). Verified: 3,952 files exported with no missing answers, the static build served by a plain file server, the Overview, preset dialog and preset fork pages checked in a browser; 139 Python and 8 UI tests
+- [ ] **Deploy it** (your accounts): import the repo on Vercel or Netlify with root `ui` (DEPLOY.md, read-only section), then replace `DEMO_URL` in the README
 - [x] 2-minute demo script (`pitch/DEMO_SCRIPT.md`)
 - [ ] **Record the 2-minute video** (yours, from the script)
 - [x] A note per Tier 1 company (`pitch/private/COMPANIES.md`, git-ignored, D-055)
@@ -693,6 +694,26 @@ injection through tool output.
 - Deferred (D-053): importing OTel GenAI traces from other frameworks; a LangGraph adapter.
 - **Learn:** OTLP ingestion, product storytelling.
 - **Pitch:** everyone. Each message links the demo that fits that company's product.
+
+#### How we built it (hosting)
+
+1. **First, a live backend** (D-054): the UI on Vercel or Netlify, proxying `/api` to one
+   container (API, worker thread, SQLite) that seeds itself from `lab snapshot`. Guards in
+   `hosting.py`: replay open, fork and blame behind a demo key with N ≤ 3 and an hourly cap.
+2. **Then read-only won** (D-057). For a two-minute look, a link that always loads and costs
+   nothing beats live forking. `lab export-static` calls the real API in-process (FastAPI's test
+   client) and saves each answer as a file named after its URL, crawling from the run list into
+   forks, blames, evals and the benchmark. Diffs exist for every pair, so only the linked pairs are
+   exported, plus an index the UI uses to offer only those. Everything is scanned for keys.
+3. **One flag switches the UI**: Vite's mode `static` makes `api.ts` read `/data/*.json`, filter
+   the run list in the browser, and refuse POSTs, and makes `publicDir` copy the data in. The
+   config file says `fork: "preset"`, so the fork dialog offers forks run ahead of time instead.
+4. **Verified:** 5 exporter tests (every linked page exported, diff pairs, the static config and
+   presets, an unfinished preset refused, keys refused) and 3 URL-mapping tests; a full export
+   with nothing missing; the built site checked in a browser.
+
+**Not done, and worth saying in an interview:** the export is a snapshot (refresh by re-exporting),
+and it grows the repo by a few MB each time; a bucket or CDN upload would avoid that.
 
 ---
 

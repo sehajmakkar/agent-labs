@@ -6,8 +6,10 @@ import { useLoad } from "../lib/hooks";
 /** The front door: what the lab does, in the order of the loop, each step linked to a real example. */
 export function Home() {
   const showcase = useLoad(api.showcase, "showcase");
+  const presets = useLoad(api.presets, "presets");
   const config = useConfig();
   const s = showcase.data;
+  const preset = presets.data?.[0];
 
   return (
     <div className="page home">
@@ -19,6 +21,20 @@ export function Home() {
           with a correction against a control. Everything below is a real run from this lab.
         </p>
         {s && <Numbers s={s} />}
+        {config.static && (
+          <p className="static-note">
+            This is a read-only copy of the lab: click through any run, fork, diff or blame.
+            {preset && (
+              <>
+                {" "}
+                <a href={`#/runs/${preset.run_id}?span=${preset.span_id}&fork=1`}>
+                  Try a fork yourself →
+                </a>{" "}
+                <span className="muted">(the forks on offer were run ahead of time)</span>
+              </>
+            )}
+          </p>
+        )}
       </section>
 
       <ol className="loop">

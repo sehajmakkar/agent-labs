@@ -7,3 +7,5 @@ ui/dist
 .pytest_cache
 .ruff_cache
 .env
+ui/static
+ui/static-data.tar.gz

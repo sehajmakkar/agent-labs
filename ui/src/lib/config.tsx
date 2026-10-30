@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
 
-import { api, DEMO_KEY_STORAGE, type LabConfig } from "../api";
+import { api, DEMO_KEY_STORAGE, READ_ONLY, STATIC, type LabConfig } from "../api";
 import { useLoad } from "./hooks";
 
 const LOCAL: LabConfig = {
@@ -10,11 +10,22 @@ const LOCAL: LabConfig = {
   repo: "https://github.com/sehajmakkar/agent-labs",
 };
 
-const ConfigContext = createContext<LabConfig>(LOCAL);
+// What the static build assumes until its config.json loads, so no button flashes enabled.
+const READ_ONLY_CONFIG: LabConfig = {
+  ...LOCAL,
+  public: true,
+  static: true,
+  actions: { replay: false, fork: "preset", blame: false, lock_in: false },
+  max_n: 0,
+};
+
+const DEFAULT = STATIC ? READ_ONLY_CONFIG : LOCAL;
+
+const ConfigContext = createContext<LabConfig>(DEFAULT);
 
 export function ConfigProvider({ children }: { children: ReactNode }) {
   const config = useLoad(api.config, "config");
-  return <ConfigContext.Provider value={config.data ?? LOCAL}>{children}</ConfigContext.Provider>;
+  return <ConfigContext.Provider value={config.data ?? DEFAULT}>{children}</ConfigContext.Provider>;
 }
 
 export function useConfig(): LabConfig {
@@ -25,12 +36,14 @@ export function useConfig(): LabConfig {
 export function useAction(action: "fork" | "blame" | "lock_in"): { allowed: boolean; why?: string } {
   const config = useConfig();
   const setting = config.actions[action];
-  if (setting === true) return { allowed: true };
+  // "preset": the fork dialog offers forks run ahead of time instead of a live one.
+  if (setting === true || setting === "preset") return { allowed: true };
   if (setting === "key") {
     return hasDemoKey()
       ? { allowed: true }
       : { allowed: false, why: "Uses real model calls: enter a demo key (top right) to try it" };
   }
+  if (config.static) return { allowed: false, why: READ_ONLY };
   return { allowed: false, why: "Switched off on the hosted demo: run the lab locally" };
 }
 
@@ -46,7 +59,7 @@ export function hasDemoKey(): boolean {
 export function DemoKey() {
   const config = useConfig();
   const [, setTick] = useState(0);
-  if (!config.public) return null;
+  if (!config.public || config.static) return null;
   const set = hasDemoKey();
   function change() {
     const value = window.prompt(set ? "Demo key (empty to remove)" : "Demo key, to try forks and blames");

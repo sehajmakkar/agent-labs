@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { api, type RunSummary } from "../api";
+import { api, STATIC, type RunSummary } from "../api";
 import { navigate, useLoad } from "../lib/hooks";
 
 /** Pick another run to diff this one against: its source, or other runs of the same task. */
@@ -9,6 +9,12 @@ export function ComparePanel({ run }: { run: RunSummary }) {
     () => (run.task_id ? api.runs({ task_id: run.task_id }) : Promise.resolve([])),
     `compare-${run.id}`,
   );
+  // The read-only demo has diffs only for the pairs that were exported; offer just those.
+  const exported = useLoad(
+    () => (STATIC ? api.diffPairs() : Promise.resolve(null)),
+    "diff-pairs",
+  );
+  const pairs = exported.data ? new Set(exported.data) : null;
   const candidates: { id: string; label: string; aFirst: boolean }[] = [];
   if (run.parent_run_id) {
     candidates.push({ id: run.parent_run_id, label: `its source run ${run.parent_run_id.slice(0, 8)}`, aFirst: true });
@@ -23,10 +29,11 @@ export function ComparePanel({ run }: { run: RunSummary }) {
     candidates.push({ id: other.id, label: describe(other), aFirst: false });
   }
   const [choice, setChoice] = useState("");
-  if (candidates.length === 0) return null;
+  const offered = pairs ? candidates.filter((c) => pairs.has(`${run.id}/${c.id}`)) : candidates;
+  if (offered.length === 0) return null;
 
   function compare() {
-    const picked = candidates.find((c) => c.id === (choice || candidates[0].id));
+    const picked = offered.find((c) => c.id === (choice || offered[0].id));
     if (!picked) return;
     // The source run goes on the left, so the diff reads "original → this".
     navigate(picked.aFirst ? `#/diff/${picked.id}/${run.id}` : `#/diff/${run.id}/${picked.id}`);
@@ -36,7 +43,7 @@ export function ComparePanel({ run }: { run: RunSummary }) {
     <div className="compare-panel">
       <span className="muted">Compare with</span>
       <select value={choice} onChange={(e) => setChoice(e.target.value)} aria-label="Run to compare with">
-        {candidates.slice(0, 40).map((c) => (
+        {offered.slice(0, 40).map((c) => (
           <option key={c.id} value={c.id}>
             {c.label}
           </option>

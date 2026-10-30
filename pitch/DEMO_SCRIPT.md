@@ -5,8 +5,8 @@ shows the fix → the failure is locked in so CI catches it next time.** Every s
 
 ## Before you record
 
-- Open the hosted lab (or `uv run lab ui`) at 1440×900. Close other tabs and turn notifications
-  off.
+- Record from `uv run lab ui` (local, everything live) at 1440×900, not the hosted demo: the hosted
+  copy is read-only, so its Blame button is hidden. Close other tabs and turn notifications off.
 - Pre-open, in order: **Overview** · **the refund run** (Overview → "Open a recorded run") ·
   **its blame** · **the diff** (Overview → "Original vs fixed") · **the Blame accuracy** page.
 - Have a terminal ready with the gate clip (see 1:40), or record that part separately.

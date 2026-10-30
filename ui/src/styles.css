@@ -1494,3 +1494,49 @@ pre.code {
   font-size: 13px;
   color: var(--muted);
 }
+
+/* Read-only demo (D-057) */
+
+.static-note {
+  margin: 14px 0 0;
+  padding: 10px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.button-link {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  background: var(--surface);
+  text-decoration: none;
+}
+
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preset {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+}
+
+.preset:hover {
+  border-color: var(--accent);
+}
+
+.preset-change {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.preset-result {
+  font-weight: 600;
+}

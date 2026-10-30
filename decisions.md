@@ -1065,3 +1065,46 @@ entry's status line.
   by rule (it could pick an odd one). We accept these because the first screen is what a busy
   reviewer judges, and the rules are simple and visible in `server.py`.
 - **Rationale:** A demo is read in 30 seconds; it should tell one story at a time.
+
+## D-057 — The hosted demo is read-only, with forks run ahead of time ("A+")
+
+- **Date:** 2026-10-30
+- **Status:** Accepted (the author chose "A+" from three options: read-only, read-only plus preset
+  forks, or the live backend of D-054). It changes D-054's default; the live setup stays available.
+- **Context:** A founder gives a demo link about two minutes. It must load at once, show real
+  results, and never fail or cost money while someone is looking. The live backend (D-054) needs
+  a container, a key on a server, a demo key handed out, and can fail when Gemini is overloaded.
+- **Decision:**
+  - `lab export-static` asks the real API, in-process, for every page the UI can show and writes
+    each answer as a JSON file (`ui/static/data`, committed). `npm run build:static` makes a UI
+    that reads those files instead of calling `/api`. Vercel or Netlify serve it alone.
+  - What would start work is off: replay links to an existing replay, Blame is hidden, lock-in is
+    off. "Compare with" offers only the diff pairs that were exported (each run against its source,
+    original runs of the same task against each other).
+  - **Preset forks:** `deploy/presets.json` lists forks run ahead of time on the showcase run
+    (the real fix 5/5 vs 0/5; vague advice 0/5 vs 0/5; Flash 5/5 vs 0/5). In the static build, the
+    fork dialog offers them instead of a live fork, and both the dialog and the fork page say they
+    were run ahead of time.
+- **Trade-offs:**
+  - Visitors can't fork or blame anything new; the Loom and a local `lab ui` on a call show that.
+  - The data is a snapshot: re-export and push to refresh it.
+  - About 4,000 small files (33 MB, about 4 MB compressed) in git, and more on every refresh.
+  - Only exported diff pairs exist.
+  - We accept these because the link then costs $0, never sleeps, keeps no key on any server and
+    can't fail in front of a founder. The presets keep the one interaction that shows the idea.
+- **Rationale:** Prove it with real results that always load; save live forking for calls.
+
+## D-058 — The read-only demo's data is committed as one archive
+
+- **Date:** 2026-10-30
+- **Status:** Accepted (the author asked why about 4,000 JSON files showed up as changes). It
+  amends D-057, which committed the exported folder itself.
+- **Decision:** `lab export-static` also packs the folder into `ui/static-data.tar.gz`. Git keeps
+  only that file; `ui/static/` is ignored. `npm run build:static` unpacks it before building. The
+  archive is reproducible (sorted files, fixed times and owners, no time or name in the gzip
+  header), so the same data gives the same bytes.
+- **Trade-offs:** A git diff of the archive says nothing about which runs changed, and the build
+  now depends on `tar` (present on Vercel, Netlify, macOS and Linux). We accept these because one
+  3.4 MB file per refresh beats a commit touching thousands of files, and the data is generated,
+  not reviewed by hand.
+- **Rationale:** Commit generated data as one artifact, not as a folder of thousands of small files.

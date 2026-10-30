@@ -275,7 +275,14 @@ export type DiffResult = {
 
 export type LabConfig = {
   public: boolean;
-  actions: { replay: boolean; fork: boolean | "key"; blame: boolean | "key"; lock_in: boolean };
+  /** The read-only build: data from exported files, forks from presets (D-057). */
+  static?: boolean;
+  actions: {
+    replay: boolean;
+    fork: boolean | "key" | "preset";
+    blame: boolean | "key";
+    lock_in: boolean;
+  };
   max_n: number;
   repo: string;
 };
@@ -294,6 +301,22 @@ export type Showcase = {
   eval: { id: string; metrics: Metrics; model: string } | null;
   bench: { failures: number; top1: Record<string, number | null>; precision: number | null } | null;
   replay: { id: string; source: string } | null;
+};
+
+/** A fork run ahead of time for the read-only demo, offered in place of a live fork. */
+export type Preset = {
+  fork_id: string;
+  run_id: string;
+  span_id: string;
+  label: string;
+  title: string;
+  change: string;
+  n: number;
+  passed: number | null;
+  control_passed: number | null;
+  p_value: number | null;
+  verdict: string;
+  created_at: string;
 };
 
 export type ForkRequest = {
@@ -346,7 +369,37 @@ function demoKey(): string | null {
   }
 }
 
+/**
+ * The read-only demo (D-057): `npm run build:static` calls no API. It reads the JSON files
+ * `lab export-static` saved, the same answers `lab ui` would give.
+ */
+export const STATIC = import.meta.env.MODE === "static";
+
+export const READ_ONLY =
+  "This is a read-only copy of the lab: clone the repo and run `lab ui` to try this live";
+
+/** Where the static build finds an API answer: /api/runs/x → /data/runs/x.json. */
+export function staticUrl(path: string): string {
+  const [route, query = ""] = path.replace(/^\/api\//, "").split("?");
+  if (route === "diff") {
+    const params = new URLSearchParams(query);
+    return `/data/diff/${params.get("a")}/${params.get("b")}.json`;
+  }
+  return `/data/${route}.json`;
+}
+
+async function getStatic<T>(path: string, init?: RequestInit): Promise<T> {
+  if (init?.method === "POST") throw new Error(READ_ONLY);
+  const response = await fetch(staticUrl(path));
+  // A missing file can come back as the site's index page, so check it really is JSON.
+  if (!response.ok || !response.headers.get("content-type")?.includes("json")) {
+    throw new Error("Not included in this read-only demo");
+  }
+  return response.json();
+}
+
 async function get<T>(path: string, init?: RequestInit): Promise<T> {
+  if (STATIC) return getStatic<T>(path, init);
   const key = demoKey();
   if (key && init?.method === "POST") {
     init = { ...init, headers: { ...(init.headers ?? {}), "X-Demo-Key": key } };
@@ -360,7 +413,17 @@ async function get<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  runs: (params: { status?: string; agent?: string; task_id?: string } = {}) => {
+  runs: async (params: { status?: string; agent?: string; task_id?: string } = {}) => {
+    if (STATIC) {
+      // One exported list of every run; filter it here the way the API would.
+      const all = await get<RunSummary[]>("/api/runs");
+      return all.filter(
+        (r) =>
+          (!params.status || r.status === params.status) &&
+          (!params.agent || r.agent_name === params.agent) &&
+          (!params.task_id || r.task_id === params.task_id),
+      );
+    }
     const query = new URLSearchParams({ limit: "200" });
     if (params.status) query.set("status", params.status);
     if (params.agent) query.set("agent", params.agent);
@@ -400,4 +463,7 @@ export const api = {
   evals: () => get<EvalRun[]>("/api/evals"),
   eval: (id: string) => get<EvalDetail>(`/api/evals/${id}`),
   failureCategories: () => get<Record<string, string>>("/api/failure-categories"),
+  // Only in the static build: the preset forks, and which run pairs have an exported diff.
+  presets: () => (STATIC ? get<Preset[]>("/api/presets") : Promise.resolve([])),
+  diffPairs: () => get<string[]>("/api/diffs"),
 };

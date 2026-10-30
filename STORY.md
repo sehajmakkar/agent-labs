@@ -422,9 +422,19 @@ visitor:
   each step linked to the real run, blame, fork or diff that proves it.
 - **The run page** tells one story at a time: an action row, a banner ("⚑ Step 3 is at fault,
   verified 5/5 vs 0/5"), and tabs.
-- **Hosted, but safe:** the UI on Vercel or Netlify, the backend in a container. Anyone can browse
-  and **replay** (free); **fork** and **blame** spend real model calls, so they need a demo key and
-  are capped per hour.
+- **Hosted as a read-only copy** (D-057): every real run, fork, diff, blame and eval is exported
+  as JSON and served by Vercel or Netlify with no backend. It costs nothing, never sleeps, and
+  can't fail in front of a founder. One thing stays interactive: on the refund run, the fork
+  dialog offers three forks run ahead of time, and the contrast is the lesson:
+
+  ```
+  fork at step 3 of the refund run        with it   without   p
+  ├── add the one missing rule            5/5       0/5       0.008   the real fix
+  ├── "be as helpful and thorough"        0/5       0/5       1.0     vague advice does nothing
+  └── same prompt, Gemini Flash           5/5       0/5       0.008   a bigger model also fixes it
+  ```
+
+  (The live backend, with a demo key for real forks, is still in the repo for when it's needed.)
 - **The pitch kit:** a 2-minute script that tells the whole loop in one story, a technical write-up,
   and a note per target company saying which feature to lead with.
 

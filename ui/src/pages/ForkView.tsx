@@ -8,6 +8,8 @@ import { navigate, useLoad } from "../lib/hooks";
 /** One fork job: what changed, where, and whether it helped compared with the control. */
 export function ForkView({ id }: { id: string }) {
   const detail = useLoad(() => api.fork(id), id);
+  const presets = useLoad(api.presets, "presets");
+  const preset = presets.data?.find((p) => p.fork_id === id);
   const status = detail.data?.fork.status;
 
   // Poll while a worker is on it.
@@ -37,6 +39,13 @@ export function ForkView({ id }: { id: string }) {
         </h1>
         <span className={`pill ${fork.status === "error" ? "pill-fail" : ""}`}>{fork.status}</span>
       </div>
+
+      {preset && (
+        <p className="banner">
+          ⑂ <strong>{preset.title}</strong>: one of the forks run ahead of time for this read-only
+          demo, on {localTime(preset.created_at)}. Everything below is its real result.
+        </p>
+      )}
 
       <section className="panel">
         <h2>The change</h2>

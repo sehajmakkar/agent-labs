@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:static": "rm -rf static/data && mkdir -p static && tar -xzf static-data.tar.gz -C static && tsc --noEmit && vite build --mode static",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

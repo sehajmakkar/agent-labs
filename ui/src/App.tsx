@@ -43,7 +43,7 @@ function Shell() {
         {link("#/evals", "Evals", "evals")}
         {link("#/blame-bench", "Blame accuracy", "bench")}
         <span className="nav-right">
-          {config.public && <span className="pill">public demo</span>}
+          {config.public && <span className="pill">{config.static ? "read-only demo" : "public demo"}</span>}
           <DemoKey />
           <a href={config.repo}>GitHub</a>
         </span>

@@ -228,3 +228,12 @@ Entries marked _anticipated_ were identified during planning and have not been h
 - **Resolution:** `RetryPolicy.max_hint_s` (120s). A longer hint fails at once with "probably a
   quota limit; not retrying", and a test covers it. The "after" benchmark wasn't rerun; the
   "before" numbers stand, and the rerun is one command (`lab blame-bench --verify 9 -n 3`).
+
+## C-023 — The static preview served nothing from /data _(resolved)_
+- **Problem:** Checking the read-only build with `npx vite preview` returned 404 for every
+  `/data/*.json` file that was in `dist`. `npx` had downloaded a different Vite version instead of
+  using the project's own, and that version didn't serve the folder as expected.
+- **Resolution:** Checked with a plain static file server instead (`python3 -m http.server` in
+  `ui/dist`), which behaves like Vercel and Netlify: JSON served as `application/json`, a missing
+  file a 404. The UI also checks the content type, in case a host answers a missing file with the
+  index page.

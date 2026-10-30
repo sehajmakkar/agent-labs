@@ -1,0 +1,17 @@
+[
+  {
+    "fork_id": "9da8a1f2",
+    "title": "Add the one missing rule",
+    "change": "Adds to the prompt: \"After a refund succeeds, always tell the customer its refund ID and when the money will arrive.\""
+  },
+  {
+    "fork_id": "2af9c5cd",
+    "title": "Give it vague advice",
+    "change": "Adds to the prompt: \"Be as helpful and thorough as you can.\""
+  },
+  {
+    "fork_id": "97e32b1d",
+    "title": "Switch to a stronger model",
+    "change": "Same prompt; from step 3 on, the agent runs on Gemini Flash instead of Flash-Lite."
+  }
+]

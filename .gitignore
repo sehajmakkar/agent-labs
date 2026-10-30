@@ -10,3 +10,7 @@ dist/
 
 # Per-company pitch notes: private (decisions.md D-055)
 pitch/private/
+
+# The read-only demo's data, unpacked from ui/static-data.tar.gz (D-058)
+ui/static/
+.DS_Store

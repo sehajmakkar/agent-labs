@@ -13,7 +13,8 @@ The goal is to move beyond agents that *seem* to work toward agents whose reliab
 ## What It Has Shown So Far
 
 Everything below was measured on real runs (Gemini Flash-Lite and Flash). See the
-[live demo](DEMO_URL) and the [technical write-up](pitch/WRITEUP.md).
+[hosted demo](DEMO_URL) (a read-only copy: click through every real run, fork and blame, and try
+the forks run ahead of time) and the [technical write-up](pitch/WRITEUP.md).
 
 | | Result |
 |---|---|

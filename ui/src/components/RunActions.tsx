@@ -1,13 +1,22 @@
 import { useState } from "react";
 
 import { api, type BlameInfo, type RunSummary } from "../api";
-import { useAction } from "../lib/config";
+import { useAction, useConfig } from "../lib/config";
 import { navigate } from "../lib/hooks";
 import { ComparePanel } from "./ComparePanel";
 import { LockInButton } from "./LockInButton";
 
 /** The run page's actions, in one row: replay, compare, blame, lock in. */
-export function RunActions({ run, blames }: { run: RunSummary; blames: BlameInfo[] }) {
+export function RunActions({
+  run,
+  blames,
+  replays,
+}: {
+  run: RunSummary;
+  blames: BlameInfo[];
+  replays: RunSummary[];
+}) {
+  const config = useConfig();
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
   const blameAction = useAction("blame");
@@ -29,7 +38,13 @@ export function RunActions({ run, blames }: { run: RunSummary; blames: BlameInfo
 
   return (
     <div className="run-actions">
-      {run.mode !== "replay" && (
+      {run.mode !== "replay" && !config.actions.replay && replays.length > 0 && (
+        // Read-only demo: nothing can run, but a replay made earlier can still be opened.
+        <a className="button-link" href={`#/runs/${replays[0].id}`} title="This run replayed from its recordings">
+          ↺ See its replay
+        </a>
+      )}
+      {run.mode !== "replay" && config.actions.replay && (
         <button
           onClick={() => act("replay", () => api.replay(run.id), (r) => `#/runs/${r.run_id}`)}
           disabled={!!busy}
@@ -39,7 +54,7 @@ export function RunActions({ run, blames }: { run: RunSummary; blames: BlameInfo
         </button>
       )}
       <ComparePanel key={run.id} run={run} />
-      {canBlame && (
+      {canBlame && !config.static && (
         <button
           className="primary"
           onClick={() => act("blame", () => api.createBlame(run.id), (r) => `#/blames/${r.id}`)}

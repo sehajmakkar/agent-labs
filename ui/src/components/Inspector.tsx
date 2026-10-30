@@ -2,9 +2,10 @@ import { useState, type ReactNode } from "react";
 
 import { api, type Recording, type RunSummary, type Span } from "../api";
 import { money, tokens } from "../lib/format";
-import { useAction } from "../lib/config";
+import { useAction, useConfig } from "../lib/config";
 import { useLoad } from "../lib/hooks";
 import { ForkDialog } from "./ForkDialog";
+import { PresetForkDialog } from "./PresetForks";
 
 /** Everything recorded about one span. For a model call, that is the exact prompt and reply. */
 export function Inspector({
@@ -22,6 +23,7 @@ export function Inspector({
 }) {
   const [forking, setForking] = useState(openFork);
   const forkAction = useAction("fork");
+  const presetsOnly = useConfig().actions.fork === "preset";
   const forkable = span.kind !== "agent" && run.mode !== "replay";
   const recordings = useLoad(
     () => (span.kind === "llm" || span.kind === "tool" ? api.recordings(span.id) : Promise.resolve([])),
@@ -59,9 +61,12 @@ export function Inspector({
           ⑂ Fork from here
         </button>
       )}
-      {forking && (
-        <ForkDialog run={run} span={span} spans={spans} onClose={() => setForking(false)} />
-      )}
+      {forking &&
+        (presetsOnly ? (
+          <PresetForkDialog run={run} onClose={() => setForking(false)} />
+        ) : (
+          <ForkDialog run={run} span={span} spans={spans} onClose={() => setForking(false)} />
+        ))}
 
       {span.error && (
         <Section title="Error">

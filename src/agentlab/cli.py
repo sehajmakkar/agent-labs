@@ -12,6 +12,7 @@
 - `lab worker`: run fork jobs queued from the UI, with this repo's agent code
 - `lab diff RUN_A RUN_B`: line two runs up step by step and show where they diverge
 - `lab ui`: serve the web UI and its API
+- `lab export-static`: save the UI's data as JSON files, for the read-only hosted demo
 - `lab models`: list the Gemini models your API key can use
 """
 
@@ -71,6 +72,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sn = commands.add_parser("snapshot", help="copy the trace store, compressed, to seed a host")
     sn.add_argument("--out", default="deploy/seed.db.gz")
+
+    ex = commands.add_parser(
+        "export-static", help="save every page's data as JSON, for the read-only demo (D-057)"
+    )
+    ex.add_argument("--out", default="ui/static/data")
+    ex.add_argument("--presets", default="deploy/presets.json", help="preset forks to offer")
+    ex.add_argument("--archive", default="ui/static-data.tar.gz", help="the one file git keeps")
 
     lk = commands.add_parser("lock-in", help="save a failed run as a regression test")
     lk.add_argument("run_id", help="a failed run from an eval task (an ID prefix is enough)")
@@ -163,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         return _diff(Store(settings.db_path), args.run_a, args.run_b)
     if args.command == "snapshot":
         return _snapshot(settings, args.out)
+    if args.command == "export-static":
+        return _export_static(Store(settings.db_path), args.out, args.presets, args.archive)
     if args.command == "lock-in":
         return _lock_in(Store(settings.db_path), settings, args.run_id)
     if args.command == "evals":
@@ -380,6 +390,26 @@ def _snapshot(settings: Settings, out: str) -> int:
         print(e, file=sys.stderr)
         return 1
     print(f"wrote {out} ({size / 1e6:.1f} MB): the hosted lab starts from it (deploy/start.sh)")
+    return 0
+
+
+def _export_static(store: Store, out: str, presets: str, archive: str) -> int:
+    from agentlab.static_export import export_static, pack
+
+    try:
+        stats = export_static(store, out, presets_file=presets)
+    except (LookupError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    size = pack(out, archive)
+    print(
+        f"wrote {stats.files} files ({stats.bytes / 1e6:.1f} MB) to {out}: {stats.runs} runs, "
+        f"{stats.diffs} diffs, {stats.presets} preset forks"
+    )
+    print(f"packed into {archive} ({size / 1e6:.1f} MB): commit this one file")
+    for path in stats.missing:
+        print(f"  no answer for {path}", file=sys.stderr)
+    print("build the read-only UI with: cd ui && npm run build:static")
     return 0
 
 

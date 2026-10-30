@@ -73,6 +73,9 @@ around it.
   - `diff/`: runs as steps, Needleman–Wunsch step alignment with a weighted similarity, and the diff
     report (divergence, effects, answer word diff).
   - `hosting.py`: hosted mode (`AGENTLAB_PUBLIC=1`): what is open, the demo key, caps, `snapshot`.
+  - `static_export.py`: the read-only demo (D-057): every page's API answer saved as JSON
+    (`ui/static/data`), the linked diff pairs, preset forks from `deploy/presets.json`, all packed
+    into one reproducible `ui/static-data.tar.gz`, the only file git keeps (D-058).
   - `blame/`: seeded bugs (ground truth), the blame judge, verification by forking, the blame
     runner, and the accuracy benchmark. Seeded agents are named `support~<bug>`/`triage~<bug>` and
     are included by `demo_agents(seeded=True)`.
@@ -89,8 +92,10 @@ around it.
 - `datasets/`: eval tasks as JSONL (20 tasks).
 - `ui/`: React + TypeScript + Vite + React Flow. `npm run build` → `ui/dist`, served by `lab ui`.
   Overview (`#/`) is built from `/api/showcase`; `/api/config` decides which actions are enabled.
-- `Dockerfile`, `deploy/` (start script, `seed.db.gz` from `lab snapshot`), `ui/vercel.json`,
-  `ui/netlify.toml`, `DEPLOY.md`: hosting (D-054).
+- `Dockerfile`, `deploy/` (start script, `seed.db.gz` from `lab snapshot`, `presets.json`),
+  `ui/vercel.json`, `ui/netlify.toml`, `DEPLOY.md`: hosting. The default is the read-only demo
+  (D-057): `ui/static-data.tar.gz` (committed) plus `npm run build:static`, which unpacks it; the
+  live backend (D-054) is the alternative.
 - `pitch/`: `DEMO_SCRIPT.md`, `WRITEUP.md` (public) and `private/` (git-ignored company notes).
 - `examples/customer_app.py`: an agent with its own loop, traced with the SDK alone.
 - `tests/`: pytest. Tests never call the network: use a scripted fake LLM (`tests/fakes.py`), or
@@ -117,7 +122,8 @@ uv run lab seed-failures [--runs 5]        # plant the catalog's bugs, make labe
 uv run lab blame-bench [--judges flash-lite,flash] [--verify 9] [-n 3]   # blame accuracy
 uv run lab lock-in <failed-run>           # save as a regression test (datasets/regressions.jsonl)
 uv run lab eval datasets/*.jsonl --gate 0.9   # CI gate: exit 1 on <90% or any regression failing
-uv run lab snapshot                       # deploy/seed.db.gz for the hosted demo (scanned for keys)
+uv run lab snapshot                       # deploy/seed.db.gz for the live hosted backend (scanned for keys)
+uv run lab export-static                  # read-only demo data → ui/static-data.tar.gz (then: cd ui && npm run build:static)
 docker build -t agentlab . && docker run -p 8000:8000 -e AGENTLAB_DEMO_KEY=x agentlab   # hosted mode
 (cd ui && npm install && npm run build && npm test)   # UI build and layout tests
 uv run lab ui                             # API + UI on http://127.0.0.1:8000 (Vite dev: cd ui && npm run dev)
@@ -176,7 +182,9 @@ workers run them. `AGENTLAB_TOKEN` guards `/api/store/*` when set.
   verified failing and then passing live. The rest of Phase 7 and Phase 8 are deferred.
 - **Phase 9 built** (2026-10-28): a calmer UI with an Overview page, a hosted mode with guards,
   Docker, Vercel and Netlify configs, DEPLOY.md, the demo script, the write-up, the company notes and
-  README proof. Left for the author: deploying, recording the video, and outreach. 134 Python tests.
+  README proof. Left for the author: deploying, recording the video, and outreach. Then (2026-10-30)
+  the hosted demo became read-only with preset forks (D-057, `lab export-static`). 139 Python
+  tests, 8 UI tests.
 - Deferred (D-053): the rest of Phase 7, Phase 8, OTel import, a LangGraph adapter.
 - Stack accepted (D-003 to D-006, D-011):
   - Python 3.12 with uv, FastAPI, SQLite/SQLModel, React + React Flow.
